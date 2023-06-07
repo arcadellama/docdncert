@@ -1,0 +1,156 @@
+#!/usr/bin/env sh
+
+# Global Variables passed from Certbot
+RENEWED_DOMAINS="${RENEWED_DOMAINS:-}"
+RENEWED_LINEAGE="${RENEWED_LINEAGE:-}"
+#DOCTL_BIN="${DOCTL_BIN:-$(command -v doctl)}"
+
+# Required dependencies
+DIGITALOCEAN_TOKEN="${DIGITALOCEAN_TOKEN:-}" # --do-token <PATH/TO/TOKEN>
+CURL_BIN="${CURL_BIN:-$(command -v curl)}" # --curl <PATH>
+JQ_BIN="${JQ_BIN:-$(command -v jq)}" # --jq <PATH>
+
+# Local variables
+prgnam='do-cdn-cert'
+do_api_url="https://api.digitalocean.com/v2"
+current_date="$(date +"%Y-%m-%dT%H:%M:%S")"
+certkey="$RENEWED_LINEAGE/cert.pem"
+fullchain="$RENEWED_LINEAGE/fullchain.pem"
+privkey="$RENEWED_LINEAGE/privkey.pem"
+cdn_id=""
+new_cert_id=""
+
+# Functions
+log_this() {
+    _bold="\033[1m"
+    _red="\033[31m"
+    _reset="\033[m"
+    case "$1" in
+        error)
+            shift
+            printf '%b%b[%s] %s ERROR:%b %s\n' \
+                "$_bold" "$_red" "$prgnam" "$current_date" "$_reset" "$@"
+            ;;
+        *)
+            printf '%b[%s] %s:%b %s\n' \
+                "$_bold" "$prgnam" "$current_date" "$_reset" "$@"
+            ;;
+    esac
+}
+
+replace_newline() {
+    printf '%s\n' "$(sed 's/$/\\n/' "$1" | tr -d '\n')" || return 1
+}
+
+get_do_json() {
+    _type="$1"
+    _output="$(mktemp)"
+    _endpoint=""
+    _ret=""
+
+    # Find the endpoint
+    case "$_type" in
+        cdn) _endpoint="cdn/endpoints" ;;
+        certificates) _endpoint="certificates" ;;
+    esac
+
+    # Try the curl action
+    _ret="$(curl_bin \
+        -s \
+        -o "$_output" \
+        -w '%{http_code}' \
+        -X GET \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
+        "$do_api_url/$_endpoint")" || return 1
+
+    # Check if successful, or return error code
+    if [ "$_ret" -ne 200 ]; then
+        printf '%s\n' "$_ret"
+        return 1
+    fi
+
+    # Return the json from digital ocean
+    printf '%s\n' "$_output"
+}
+
+update_cdn_certificate() {
+    _cdn_id="$1"
+    _cert_id="$2"
+    _output="$(mktemp)"
+    _endpoint="cdn/endpoints/$_cdn_id"
+    _ret=""
+
+    # Try the curl action
+    _ret="$(curl_bin \
+        -s \
+        -o "$_output" \
+        -w '%{http_code}' \
+        -X PUT \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
+        -d {"certificate_id": "$_cert_id"} \
+        "$do_api_url/$_endpoint")" || return 1
+
+    # Check if successful, or return error code
+    if [ "$_ret" -ne 200 ]; then
+        printf '%s\n' "$_ret"
+        return 1
+    fi
+}
+
+create_do_certificate() {
+    _cert_name="$1"
+    _priv_key="$(replace_newline "$2")"
+    _leaf_cert="$(replace_newline "$3")"
+    _cert_chain="$(replace_newline "$4")"
+    _output="$(mktemp)"
+    _endpoint="certificates"
+    _ret=""
+    _payload="$(printf '{"name": "%s", "type": "custom", "private_key": "%s", "leaf_certificate": "%s", "certificate_chain": "%s"}' "$_cert_name" "$_priv_key" "$_leaf_cert" "$_cert_chain")" || return 1
+
+    # Try the curl action
+    _ret="$(curl_bin \
+        -s \
+        -o "$_output" \
+        -w '%{http_code}' \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
+        -d "${_payload}" \
+        "$do_api_url/$_endpoint")" || return 1
+
+    # Check if successful, or return error code
+    if [ "$_ret" -ne 201 ]; then
+        printf '%s\n' "$_ret"
+        return 1
+    fi
+
+    # Return the json from digital ocean
+    printf '%s\n' "$_output"
+}
+
+main() {
+    # Test Global Variables
+    if [ -z "$RENEWED_DOMAINS" ]; then
+    	log_this error "No RENEWED_DOMAINS var."
+    	exit 1
+    elif [ -z "$RENEWED_LINEAGE" ]; then
+    	log_this error "No RENEWED_LINEAGE var."
+    	exit 1
+    elif [ ! -x "$CURL_BIN" ]; then
+    	log_this error "curl not found."
+    	exit 1
+    elif [ ! -x "$JQ_BIN" ]; then
+    	log_this error "jq not found."
+    	exit 1
+    fi
+    
+    # Loop through list of current CDN
+    # Loop through the RENEWED_DOMAINS to check if a match in domains
+    
+    # Create new certificate 
+    # Exit if failed, or, capture the ID as new_cert_id
+    # Update the CDN certificate to the new ID
+}
+
