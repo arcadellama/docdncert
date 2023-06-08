@@ -59,16 +59,14 @@ time_to_seconds() {
     return 1
 }
 
-# Returns 0 if expired, 1 if not
-is_expired() {
+# Returns 1 (error) if less than 60 days left on certificate
+expiry_check() {
     _cert_date=$(time_to_seconds "$1")
     _current_date=$(time_to_seconds "$(date '+%Y-%m-%d %H:%M:%S')")
     _sixty_days=5184000
     _difference=$(( _cert_date - _current_date))
 
     if [ "$_difference" -le "$_sixty_days" ]; then
-        return 0
-    else
         return 1
     fi
 }
