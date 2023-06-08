@@ -2,8 +2,10 @@
 
 # Required dependencies
 DIGITALOCEAN_TOKEN="${DIGITALOCEAN_TOKEN:-}" # --do-token <PATH/TO/TOKEN>
+DNS_HOOK="${DNS_HOOK:-}" # --dns-hook <dns_hook>
 CURL_BIN="${CURL_BIN:-$(command -v curl)}" # --curl <PATH>
 JQ_BIN="${JQ_BIN:-$(command -v jq)}" # --jq <PATH>
+ACME_BIN="${ACME_BIN:-$(command -v acme.sh)}" # --acme <PATH>
 
 # Local variables
 _PRGNAM='do-cdn-cert'
@@ -40,7 +42,7 @@ time_to_seconds() {
         return
     fi
 
-    # Try BSD date (for BSD and MacOS)
+    # Try BSD date
     if date -j -f '%Y-%m-%d %H:%M:%S' "$_time" '+%s' 2>/dev/null; then
         return
     fi
@@ -102,7 +104,7 @@ create_do_cert() {
     _response="$(mktemp)"
     _endpoint="certificates"
     _ret=""
-    _payload="$(printf '{"name": "%s", "type": "custom", "private_key": "%s", "leaf_certificate": "%s", "certificate_chain": "%s"}' "$_cert_name" "$_priv_key" "$_leaf_cert" "$_cert_chain")" || return 1
+    _payload=$(printf '{"name": "%s", "type": "custom", "private_key": "%s", "leaf_certificate": "%s", "certificate_chain": "%s"}' "$_cert_name" "$_priv_key" "$_leaf_cert" "$_cert_chain") || return 1
 
     # Try the curl action
     _ret="$(curl_bin \
@@ -150,6 +152,26 @@ update_cdn_cert() {
     fi
 }
 
+issue_cert() {
+    _domain="$1"
+    _certfile="$2"
+    _keyfile="$3"
+    _fullchainfile="$4"
+
+    if ! "$ACME_BIN" --issue \
+        -d "$_domain" \
+        --cert-file "$_certfile" \
+        --key-file "$_keyfile" \
+        --fullchain-file "$_fullchainfile" \
+        --dns "$DNS_HOOK" 2>&1/dev/null; then
+            return 1
+    fi
+}
+
+namify() {
+    printf '%s\n' "$*" | tr ' ' '-' | tr '.' '-' | tr ':' '-' | tr ';' '-'
+}
+
 main() {
     # Test Global Variables
     if [ ! -x "$CURL_BIN" ]; then
@@ -158,6 +180,12 @@ main() {
     elif [ ! -x "$JQ_BIN" ]; then
     	log_this error "jq not found."
     	exit 1
+    elif [ -z "$DIGITALOCEAN_TOKEN" ]; then
+        log_this error "Need to specify Digital Ocean token."
+        exit 1
+    elif [ -z "$DNS_HOOK" ]; then
+        log_this error "Need to specify a DNS hook from wiki.acme.sh."
+        exit 1
     fi
    
     _cdn_list=""
@@ -170,42 +198,78 @@ main() {
     _cdn_count=$("$JQ_BIN" -r .meta.total < "$_cdn_id")
     # LOOP THROUGH LIST OF CURRENT CDN
     while [ "$_cdn_count" -gt 0 ]; do
-        _cdn_id="" _cdn_cert_id="" _cdn_domain="" 
+        _cdn_id="" _old_cert_id="" _cdn_domain="" 
         _old_cert="" _old_cert_expiry="" _old_cert_type=""
+        _new_cert_name="" _new_cert_id=""
+        _certkey=$(mktemp)
+        _privkey=$(mktemp)
+        _fullchain=$(mktemp)
         
         # Save the cdn_id, cdn_certificate_id, cdn_custom_domain
-        _cdn_id=$("$JQ_BIN" -r .endpoints["$_cdn_count"].id)
-        _cdn_cert_id=$("$JQ_BIN" -r .endpoints["$_cdn_count"].certificate_id)
-        _cdn_domain=$("$JQ_BIN" -r .endpoints["$_cdn_count"].custom_domain)
+        _cdn_id=$("$JQ_BIN" -r \
+            .endpoints["$_cdn_count"].id < "$_cdn_list")
+        _old_cert_id=$("$JQ_BIN" -r \
+            .endpoints["$_cdn_count"].certificate_id < "$_cdn_list")
+        _cdn_domain=$("$JQ_BIN" -r \
+            .endpoints["$_cdn_count"].custom_domain < "$_cdn_list")
 
-        # If no certificate_id --> CREATE NEW CERTIFICATE
-        # if [ -z "$_cdn_cert_id"
-        # Else Get the id, not_after, and type of existing certificate
-        if ! _old_cert=$(get_do certificate "$_cdn_cert_id"); then
-            log_this error "Cannot get certificate, error code: $_old_cert"
+        # Check that certificate id exists
+        if [ -n "$_old_cert_id" ]; then
+            # Else Get the id, not_after, and type of existing certificate
+            if ! _old_cert=$(get_do certificate "$_old_cert_id"); then
+                log_this error "Cannot get certificate, error code: $_old_cert"
+                return 1
+            fi
+    
+            _old_cert_expiry=$("$JQ_BIN" -r \
+                .certificate.not_after < "$_old_cert")
+            _old_cert_type=$("$JQ_BIN" -r \
+                .certificate.type < "$_old_cert")
+    
+            # Check if a custom certificate, otherwise continue the loop
+            if ! [ "$_old_cert_type" = "custom" ]; then
+                continue
+            fi
+    
+            # Check if certificate is expired, continue the loop if not
+            if expiry_check "$_old_cert_expiry"; then
+                log_this "Certificate for $_cdn_domain not expired."
+                continue
+            fi
+        fi
+
+        # Issue a new cert
+        if ! issue_cert \
+            "$_cdn_domain" "$_certkey" "$_privkey" "$_fullchain"; then
+            log_this error "Error issuing domain for $_cdn_domain"
+        fi
+
+        # Create a cert_name with cdn_custom_domain-date
+        _new_cert_name=$(namify "$_cdn_domain" "$(time_to_seconds "$_DATE")")
+        # CREATE NEW CERTIFICATE 
+        if ! _new_cert=$(create_do_cert "$_new_cert_name" \
+            "$_certkey" "$_privkey" "$_fullchain"); then
+                log_this error "Cannot create certificate, code: $_new_cert_id"
+                return 1
+        fi
+
+        _new_cert_id=$("$JSON_BIN" -r .certificate.id < "$_new_cert")
+        
+        # UPDATE CURRENT CDN with new certificate_id
+        if ! _update_cdn=$(update_cdn_cert "$_cdn_id" "$_new_cert_id"); then
+            log_this error "update_cdn_cert, code: $_update_cdn"
             return 1
         fi
 
-        _old_cert_expiry=$("$JQ_BIN" -r .certificate.not_after)
-        _old_cert_type=$("$JQ_BIN" -r .certificate.type)
+        log_this "Successfully updated $_cdn_domain CDN certificate!"
 
-        # Check if a custom certificate, otherwise continue the loop
-        if ! [ "$_old_cert_type" = "custom" ]; then
-            continue
+        # DELETE OLD CERTIFICATE
+        if ! _del_cert=$(delete_do_cert "$_old_cert_id"); then
+            log_this error "Cannot delete old certificate, code: $_del_cert"
         fi
 
-        # Check if certificate is expired, continue the loop if not
-        if [ expiry_check "$_old_cert_expiry" ]; then
-            continue
-        fi
+        log_this "Successfully deleted old certificate ($_old_cert_id)"
 
     done < "$_cdn_list"
 
-        # If the not_after is <= 30 days away from today --> CREATE NEW CERTIFICATE
-        # UPDATE CURRENT CDN with new certificate_id
-    # CREATE NEW CERTIFICATE 
-        # Issue a new cert for cdn_custom_domain and get cert_privatekey, cert_leafkey, cert_fullchain
-        # Create a cert_name with cdn_custom_domain-date
-    # UPDATE CURRENT CDN
 }
-
