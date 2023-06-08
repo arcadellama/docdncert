@@ -44,7 +44,7 @@ replace_newline() {
 
 get_do_json() {
     _type="$1"
-    _output="$(mktemp)"
+    _response="$(mktemp)"
     _endpoint=""
     _ret=""
 
@@ -57,7 +57,7 @@ get_do_json() {
     # Try the curl action
     _ret="$(curl_bin \
         -s \
-        -o "$_output" \
+        -o "$_response" \
         -w '%{http_code}' \
         -X GET \
         -H "Content-Type: application/json" \
@@ -71,20 +71,20 @@ get_do_json() {
     fi
 
     # Return the json from digital ocean
-    printf '%s\n' "$_output"
+    printf '%s\n' "$_response"
 }
 
 update_cdn_certificate() {
     _cdn_id="$1"
     _cert_id="$2"
-    _output="$(mktemp)"
+    _response="$(mktemp)"
     _endpoint="cdn/endpoints/$_cdn_id"
     _ret=""
 
     # Try the curl action
     _ret="$(curl_bin \
         -s \
-        -o "$_output" \
+        -o "$_response" \
         -w '%{http_code}' \
         -X PUT \
         -H "Content-Type: application/json" \
@@ -104,7 +104,7 @@ create_do_certificate() {
     _priv_key="$(replace_newline "$2")"
     _leaf_cert="$(replace_newline "$3")"
     _cert_chain="$(replace_newline "$4")"
-    _output="$(mktemp)"
+    _response="$(mktemp)"
     _endpoint="certificates"
     _ret=""
     _payload="$(printf '{"name": "%s", "type": "custom", "private_key": "%s", "leaf_certificate": "%s", "certificate_chain": "%s"}' "$_cert_name" "$_priv_key" "$_leaf_cert" "$_cert_chain")" || return 1
@@ -112,7 +112,7 @@ create_do_certificate() {
     # Try the curl action
     _ret="$(curl_bin \
         -s \
-        -o "$_output" \
+        -o "$_response" \
         -w '%{http_code}' \
         -X POST \
         -H "Content-Type: application/json" \
@@ -127,18 +127,12 @@ create_do_certificate() {
     fi
 
     # Return the json from digital ocean
-    printf '%s\n' "$_output"
+    printf '%s\n' "$_response"
 }
 
 main() {
     # Test Global Variables
-    if [ -z "$RENEWED_DOMAINS" ]; then
-    	log_this error "No RENEWED_DOMAINS var."
-    	exit 1
-    elif [ -z "$RENEWED_LINEAGE" ]; then
-    	log_this error "No RENEWED_LINEAGE var."
-    	exit 1
-    elif [ ! -x "$CURL_BIN" ]; then
+    if [ ! -x "$CURL_BIN" ]; then
     	log_this error "curl not found."
     	exit 1
     elif [ ! -x "$JQ_BIN" ]; then
@@ -147,10 +141,15 @@ main() {
     fi
     
     # Loop through list of current CDN
-    # Loop through the RENEWED_DOMAINS to check if a match in domains
-    
-    # Create new certificate 
-    # Exit if failed, or, capture the ID as new_cert_id
-    # Update the CDN certificate to the new ID
+        # Save the cdn_id, cdn_certificate_id, cdn_custom_domain
+        # After the ttl do the following:
+        # If no certificate_id --> CREATE NEW CERTIFICATE
+        # Else Get the id, not_after, and type of existing certificate
+        # If the not_after is <60 days away from today --> CREATE NEW CERTIFICATE
+        # UPDATE CURRENT CDN with new certificate_id
+    # CREATE NEW CERTIFICATE 
+        # Issue a new cert for cdn_custom_domain and get cert_privatekey, cert_leafkey, cert_fullchain
+        # Create a cert_name with cdn_custom_domain-date
+    # UPDATE CURRENT CDN
 }
 
