@@ -1,24 +1,14 @@
 #!/usr/bin/env sh
 
-# Global Variables passed from Certbot
-RENEWED_DOMAINS="${RENEWED_DOMAINS:-}"
-RENEWED_LINEAGE="${RENEWED_LINEAGE:-}"
-#DOCTL_BIN="${DOCTL_BIN:-$(command -v doctl)}"
-
 # Required dependencies
 DIGITALOCEAN_TOKEN="${DIGITALOCEAN_TOKEN:-}" # --do-token <PATH/TO/TOKEN>
 CURL_BIN="${CURL_BIN:-$(command -v curl)}" # --curl <PATH>
 JQ_BIN="${JQ_BIN:-$(command -v jq)}" # --jq <PATH>
 
 # Local variables
-prgnam='do-cdn-cert'
-do_api_url="https://api.digitalocean.com/v2"
-current_date="$(date +"%Y-%m-%dT%H:%M:%S")"
-certkey="$RENEWED_LINEAGE/cert.pem"
-fullchain="$RENEWED_LINEAGE/fullchain.pem"
-privkey="$RENEWED_LINEAGE/privkey.pem"
-cdn_id=""
-new_cert_id=""
+_PRGNAM='do-cdn-cert'
+_DATE="$(date +"%Y-%m-%d %H:%M:%S")"
+_DO_API_URL="https://api.digitalocean.com/v2"
 
 # Functions
 log_this() {
@@ -29,11 +19,11 @@ log_this() {
         error)
             shift
             printf '%b%b[%s] %s ERROR:%b %s\n' \
-                "$_bold" "$_red" "$prgnam" "$current_date" "$_reset" "$@"
+                "$_bold" "$_red" "$_PRGNAM" "$_DATE" "$_reset" "$@"
             ;;
         *)
             printf '%b[%s] %s:%b %s\n' \
-                "$_bold" "$prgnam" "$current_date" "$_reset" "$@"
+                "$_bold" "$_PRGNAM" "$_DATE" "$_reset" "$@"
             ;;
     esac
 }
@@ -59,19 +49,19 @@ time_to_seconds() {
     return 1
 }
 
-# Returns 1 (error) if less than 60 days left on certificate
+# Returns 1 (error) if less than 30 days left on certificate
 expiry_check() {
     _cert_date=$(time_to_seconds "$1")
-    _current_date=$(time_to_seconds "$(date '+%Y-%m-%d %H:%M:%S')")
-    _sixty_days=5184000
-    _difference=$(( _cert_date - _current_date))
+    _current_date=$(time_to_seconds "$_DATE")
+    _thirty_days=5184000
+    _difference=$(( _cert_date - _current_date ))
 
-    if [ "$_difference" -le "$_sixty_days" ]; then
+    if [ "$_difference" -le "$_thirty_days" ]; then
         return 1
     fi
 }
 
-get_do_json() {
+get_do() {
     _type="$1"
     _id="$2"
     _response="$(mktemp)"
@@ -81,7 +71,7 @@ get_do_json() {
     # Find the endpoint
     case "$_type" in
         cdn) _endpoint="cdn/endpoints" ;;
-        certificates) _endpoint="certificates/$_id" ;;
+        certificate) _endpoint="certificates/$_id" ;;
     esac
 
     # Try the curl action
@@ -92,7 +82,7 @@ get_do_json() {
         -X GET \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
-        "$do_api_url/$_endpoint")" || return 1
+        "$_DO_API_URL/$_endpoint")" || return 1
 
     # Check if successful, or return error code
     if [ "$_ret" -ne 200 ]; then
@@ -104,32 +94,7 @@ get_do_json() {
     printf '%s\n' "$_response"
 }
 
-update_cdn_certificate() {
-    _cdn_id="$1"
-    _cert_id="$2"
-    _response="$(mktemp)"
-    _endpoint="cdn/endpoints/$_cdn_id"
-    _ret=""
-
-    # Try the curl action
-    _ret="$(curl_bin \
-        -s \
-        -o "$_response" \
-        -w '%{http_code}' \
-        -X PUT \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
-        -d {"certificate_id": "$_cert_id"} \
-        "$do_api_url/$_endpoint")" || return 1
-
-    # Check if successful, or return error code
-    if [ "$_ret" -ne 200 ]; then
-        printf '%s\n' "$_ret"
-        return 1
-    fi
-}
-
-create_do_certificate() {
+create_do_cert() {
     _cert_name="$1"
     _priv_key="$(replace_newline "$2")"
     _leaf_cert="$(replace_newline "$3")"
@@ -148,7 +113,7 @@ create_do_certificate() {
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
         -d "${_payload}" \
-        "$do_api_url/$_endpoint")" || return 1
+        "$_DO_API_URL/$_endpoint")" || return 1
 
     # Check if successful, or return error code
     if [ "$_ret" -ne 201 ]; then
@@ -160,6 +125,31 @@ create_do_certificate() {
     printf '%s\n' "$_response"
 }
 
+update_cdn_cert() {
+    _cdn_id="$1"
+    _cert_id="$2"
+    _response="$(mktemp)"
+    _endpoint="cdn/endpoints/$_cdn_id"
+    _ret=""
+
+    # Try the curl action
+    _ret="$(curl_bin \
+        -s \
+        -o "$_response" \
+        -w '%{http_code}' \
+        -X PUT \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
+        -d {"certificate_id": "$_cert_id"} \
+        "$_DO_API_URL/$_endpoint")" || return 1
+
+    # Check if successful, or return error code
+    if [ "$_ret" -ne 200 ]; then
+        printf '%s\n' "$_ret"
+        return 1
+    fi
+}
+
 main() {
     # Test Global Variables
     if [ ! -x "$CURL_BIN" ]; then
@@ -169,13 +159,49 @@ main() {
     	log_this error "jq not found."
     	exit 1
     fi
-    
+   
+    _cdn_list=""
+    # Get list of CDN
+    if ! _cdn_list=$(get_do cdn); then
+        log_this error "Cannot get cdn list, error code: $_cdn_list"
+        return 1
+    fi
+
+    _cdn_count=$("$JQ_BIN" -r .meta.total < "$_cdn_id")
     # LOOP THROUGH LIST OF CURRENT CDN
+    while [ "$_cdn_count" -gt 0 ]; do
+        _cdn_id="" _cdn_cert_id="" _cdn_domain="" 
+        _old_cert="" _old_cert_expiry="" _old_cert_type=""
+        
         # Save the cdn_id, cdn_certificate_id, cdn_custom_domain
-        # After the ttl do the following:
+        _cdn_id=$("$JQ_BIN" -r .endpoints["$_cdn_count"].id)
+        _cdn_cert_id=$("$JQ_BIN" -r .endpoints["$_cdn_count"].certificate_id)
+        _cdn_domain=$("$JQ_BIN" -r .endpoints["$_cdn_count"].custom_domain)
+
         # If no certificate_id --> CREATE NEW CERTIFICATE
+        # if [ -z "$_cdn_cert_id"
         # Else Get the id, not_after, and type of existing certificate
-        # If the not_after is <60 days away from today --> CREATE NEW CERTIFICATE
+        if ! _old_cert=$(get_do certificate "$_cdn_cert_id"); then
+            log_this error "Cannot get certificate, error code: $_old_cert"
+            return 1
+        fi
+
+        _old_cert_expiry=$("$JQ_BIN" -r .certificate.not_after)
+        _old_cert_type=$("$JQ_BIN" -r .certificate.type)
+
+        # Check if a custom certificate, otherwise continue the loop
+        if ! [ "$_old_cert_type" = "custom" ]; then
+            continue
+        fi
+
+        # Check if certificate is expired, continue the loop if not
+        if [ expiry_check "$_old_cert_expiry" ]; then
+            continue
+        fi
+
+    done < "$_cdn_list"
+
+        # If the not_after is <= 30 days away from today --> CREATE NEW CERTIFICATE
         # UPDATE CURRENT CDN with new certificate_id
     # CREATE NEW CERTIFICATE 
         # Issue a new cert for cdn_custom_domain and get cert_privatekey, cert_leafkey, cert_fullchain
