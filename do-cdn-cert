@@ -39,11 +39,43 @@ log_this() {
 }
 
 replace_newline() {
-    printf '%s\n' "$(sed 's/$/\\n/' "$1" | tr -d '\n')" || return 1
+    sed 's/$/\\n/' "$@" | tr -d '\n'
+}
+
+time_to_seconds() {
+    _time=$(printf '%s' "$1" | sed 's/T/ /;s/Z//')
+
+    # First try GNU date
+    if date -d "$_time" '+%s' 2>/dev/null; then
+        return
+    fi
+
+    # Try BSD date (for BSD and MacOS)
+    if date -j -f '%Y-%m-%d %H:%M:%S' "$_time" '+%s' 2>/dev/null; then
+        return
+    fi
+
+    log_this error "Unable to convert time format to seconds."
+    return 1
+}
+
+# Returns 0 if expired, 1 if not
+is_expired() {
+    _cert_date=$(time_to_seconds "$1")
+    _current_date=$(time_to_seconds "$(date '+%Y-%m-%d %H:%M:%S')")
+    _sixty_days=5184000
+    _difference=$(( _cert_date - _current_date))
+
+    if [ "$_difference" -le "$_sixty_days" ]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 get_do_json() {
     _type="$1"
+    _id="$2"
     _response="$(mktemp)"
     _endpoint=""
     _ret=""
@@ -51,7 +83,7 @@ get_do_json() {
     # Find the endpoint
     case "$_type" in
         cdn) _endpoint="cdn/endpoints" ;;
-        certificates) _endpoint="certificates" ;;
+        certificates) _endpoint="certificates/$_id" ;;
     esac
 
     # Try the curl action
@@ -140,7 +172,7 @@ main() {
     	exit 1
     fi
     
-    # Loop through list of current CDN
+    # LOOP THROUGH LIST OF CURRENT CDN
         # Save the cdn_id, cdn_certificate_id, cdn_custom_domain
         # After the ttl do the following:
         # If no certificate_id --> CREATE NEW CERTIFICATE
