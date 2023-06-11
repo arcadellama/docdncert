@@ -20,12 +20,12 @@ log_this() {
     case "$1" in
         error)
             shift
-            printf '%b%b[%s] %s ERROR:%b %s\n' \
-                "$_bold" "$_red" "$_PRGNAM" "$_DATE" "$_reset" "$@"
+            printf '%b%b[%s] ERROR:%b %s\n' \
+                "$_bold" "$_red" "$_PRGNAM" "$_reset" "$@" >&2
             ;;
         *)
-            printf '%b[%s] %s:%b %s\n' \
-                "$_bold" "$_PRGNAM" "$_DATE" "$_reset" "$@"
+            printf '%b[%s]:%b %s\n' \
+                "$_bold" "$_PRGNAM" "$_reset" "$@"
             ;;
     esac
 }
@@ -55,8 +55,11 @@ time_to_seconds() {
 expiry_check() {
     _cert_date=$(time_to_seconds "$1")
     _current_date=$(time_to_seconds "$_DATE")
-    _thirty_days=5184000
+    _one_day=$(( 24 * 60 * 60 ))
+    _thirty_days=$(( _one_day * 30 ))
     _difference=$(( _cert_date - _current_date ))
+
+    printf '%d\n' "$(( _difference / _one_day ))"
 
     if [ "$_difference" -le "$_thirty_days" ]; then
         return 1
@@ -77,7 +80,7 @@ get_do() {
     esac
 
     # Try the curl action
-    _ret="$(curl_bin \
+    _ret="$("$CURL_BIN" \
         -s \
         -o "$_response" \
         -w '%{http_code}' \
@@ -103,18 +106,27 @@ create_do_cert() {
     _cert_chain="$(replace_newline "$4")"
     _response="$(mktemp)"
     _endpoint="certificates"
+    _payload=$(mktemp)
     _ret=""
-    _payload=$(printf '{"name": "%s", "type": "custom", "private_key": "%s", "leaf_certificate": "%s", "certificate_chain": "%s"}' "$_cert_name" "$_priv_key" "$_leaf_cert" "$_cert_chain") || return 1
 
+    cat << EOF > "$_payload"
+    {
+        "name": "$_cert_name",
+        "type": "custom",
+        "private_key": "$_priv_key",
+        "leaf_certificate": "$_leaf_cert",
+        "certificate_chain": "$_cert_chain"
+    }
+EOF
     # Try the curl action
-    _ret="$(curl_bin \
+    _ret="$("$CURL_BIN" \
         -s \
         -o "$_response" \
         -w '%{http_code}' \
         -X POST \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
-        -d "${_payload}" \
+        -d @"$_payload" \
         "$_DO_API_URL/$_endpoint")" || return 1
 
     # Check if successful, or return error code
@@ -132,17 +144,23 @@ update_cdn_cert() {
     _cert_id="$2"
     _response="$(mktemp)"
     _endpoint="cdn/endpoints/$_cdn_id"
+    _payload=$(mktemp)
     _ret=""
 
+    cat << EOF > "$_payload"
+    {
+        "certificate_id": "$_cert_id"
+    }
+EOF
     # Try the curl action
-    _ret="$(curl_bin \
+    _ret="$("$CURL_BIN" \
         -s \
         -o "$_response" \
         -w '%{http_code}' \
         -X PUT \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
-        -d {"certificate_id": "$_cert_id"} \
+        -d @"$_payload" \
         "$_DO_API_URL/$_endpoint")" || return 1
 
     # Check if successful, or return error code
@@ -195,12 +213,13 @@ main() {
         return 1
     fi
 
-    _cdn_count=$("$JQ_BIN" -r .meta.total < "$_cdn_id")
+    _cdn_count=$("$JQ_BIN" -r .meta.total < "$_cdn_list")
     # LOOP THROUGH LIST OF CURRENT CDN
-    while [ "$_cdn_count" -gt 0 ]; do
+    while [ "$_cdn_count" -gt -1 ]; do
+        _cdn_count=$(( _cdn_count - 1 ))
         _cdn_id="" _old_cert_id="" _cdn_domain="" 
         _old_cert="" _old_cert_expiry="" _old_cert_type=""
-        _new_cert_name="" _new_cert_id=""
+        _new_cert_name="" _new_cert_id="" _days_left=""
         _certkey=$(mktemp)
         _privkey=$(mktemp)
         _fullchain=$(mktemp)
@@ -215,7 +234,6 @@ main() {
 
         # Check that certificate id exists
         if [ -n "$_old_cert_id" ]; then
-            # Else Get the id, not_after, and type of existing certificate
             if ! _old_cert=$(get_do certificate "$_old_cert_id"); then
                 log_this error "Cannot get certificate, error code: $_old_cert"
                 return 1
@@ -232,11 +250,14 @@ main() {
             fi
     
             # Check if certificate is expired, continue the loop if not
-            if expiry_check "$_old_cert_expiry"; then
-                log_this "Certificate for $_cdn_domain not expired."
+            if _days_left=$(expiry_check "$_old_cert_expiry"); then
+                log_this "$_days_left days left until $_cdn_domain expires."
+                log_this "Not renewing $_cdn_domain."
                 continue
             fi
         fi
+
+        log_this "$_days_left days until $_cdn_domain expires, renewing."
 
         # Issue a new cert
         if ! issue_cert \
@@ -271,5 +292,5 @@ main() {
         log_this "Successfully deleted old certificate ($_old_cert_id)"
 
     done < "$_cdn_list"
-
 }
+main "$@"
