@@ -7,7 +7,28 @@ LC_ALL=C
 # Global Variables
 ########################################
 
-VERBOSE=${VERBOSE:-0}
+VERBOSE=${VERBOSE:-3}
+DIGITALOCEAN_TOKEN="${DIGITALOCEAN_TOKEN:-}"
+ACME_DNS="${ACME_DNS:-}"
+
+########################################
+# Trap Exit
+########################################
+
+trap_exit() {
+  cleanup "$tmpdir"
+}
+
+# Usage: files for deletion
+cleanup() {
+  for f in "$@"; do
+    if rm -rf "$f"; then
+      debug "rm -rf $f"
+    else
+      die "::cleanup unable to delete $1"
+    fi
+  done
+}
 
 ########################################
 # STDOUT & STDERR Functions
@@ -16,20 +37,20 @@ VERBOSE=${VERBOSE:-0}
 usage() {
   cat << EOF 
 Usage here.
-  * Bullet points
-  * More bullets
-  
-  ## Here is a command option
-
-     $ command goes here 
-
 EOF
 }
 
 out() {
-  if [ "$VERBOSE" -ge 0 ]; then
-    printf %s\\n "$*"
-  fi
+  printf %s\\n "$*"
+}
+
+die() {
+  err "$*"
+  exit 1
+}
+
+err() {
+  >&2 out "$(color r)[$(now)] ERROR: $(color x)$*"
 }
 
 warn() {
@@ -50,15 +71,6 @@ debug() {
   fi
 }
 
-err() {
-  >&2 out "$(color r)[$(now)] ERROR: $(color x)$*"
-}
-
-die() {
-  err "$*"
-  exit 1
-}
-
 color() {
   _b=$(printf %b '\033[1m') # bold
   case "$1" in
@@ -69,6 +81,34 @@ color() {
     x) printf %b%b "$_b" '\033[m' ;;      # reset
     *) warn "color func usage: 'color [r,g,y,x]'" ; return 1 ;;
   esac
+}
+
+########################################
+# I/O Functions
+########################################
+
+make_temp() {
+  out "$tmpdir/$(mktemp XXXXXXXXXXXXXXXXX)" || die "::make_tmp fail"
+}
+
+path_or_str() {
+  # Is it a file path?
+  if [ -r "$1" ]; then
+    cat "$1"
+    debug "::path_or_str is path: $1"
+    return
+  fi
+
+  # Is it a string?
+  if [ -n "$1" ]; then
+    out "$1"
+    debug "::path_or_str is string: $1"
+    return
+  fi
+
+  # It's neither (undeclared)
+  err "::part_or_string an unset variable?: $1"
+  return 1
 }
 
 str_to_line() {
@@ -141,7 +181,7 @@ _curl() {
   endpoint="$2"
   headers="$3"
   data="$4"
-  response="$(mktemp)"
+  response="$(make_temp)"
   payload="$endpoint"
   fn_use="_curl <GET|PUT|POST|DELETE> <endpoint> <headers> <data>"
   ret=""
@@ -192,43 +232,82 @@ _curl() {
 }
 
 ########################################
-# Local Variables
+# Program Variables
 ########################################
 
 #do_api="https://api.digitalocean.com/v2"
 #do_cdn_endpoint="$do_api/cdn/endpoints"
 #do_cert_endpoint="$do_api/certificates"
 #do_api_content_type="application/json"
+tmpdir="$(mktemp -d)" || die "Unable to mktemp -d: $?"
+
+########################################
+# Program Functions
+########################################
+
+list() {
+_usage="list [cdn|certs] [<id>|all]"
+  case "$1" in
+    cdn) list_cdn "$2" ;;
+    certs) list_certs "$2" ;;
+    *) die "$_usage" ;;
+  esac
+}
+
+create() {
+_usage="create cert <name> <private_key> <leaf_cert> <cert_chain>"
+  case "$1" in
+    cert) shift ; create_cert "$@" ;;
+    *) die "$_usage" ;;
+  esac
+}
+
+renew() {
+_usage="renew [<cdn_id>|all]"
+  case "$1" in
+    all) renew_all ;;
+    *) renew_cdn "$1" ;;
+  esac
+}
 
 main() {
+  arg_cmd=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      # Commands
+      renew|list|create)
+        [ -n "$arg_cmd" ] || die "$(usage)"
+        arg_cmd="$1 $2"
+        debug "arg_cmd=$arg_cmd"
+        shift 2 ;;
+      # Flags
       --dns)
-        LE_DNS="$2" 
-        debug "LE_DNS=$LE_DNS"
+        ACME_DNS="$2" 
         shift 2 ;;
       --do-token)
-        if ! do_token=$(get_token "$2"); then
+        if ! do_token=$(path_or_str "$2"); then
           die "Usage: '--do-token' <string|path>"
         fi
         debug "do_token=$do_token"
         shift 2
         ;;
+      # Logging / Usage
       -v) VERBOSE=1 ; shift ;;
       -vv) VERBOSE=2 ; shift ;;
       -vvv|--debug) VERBOSE=3 ; shift ;;
-      --verbose=*)
-        if ! VERBOSE=$(is_int "${1#*=}"); then 
+      --verbose)
+        if ! VERBOSE=$(is_int "$2"); then 
           die "Usage: '--verbose=<int>'"
         fi
-        shift ;;
+        shift 2 ;;
       -q|--quiet) VERBOSE=-1 ; shift ;;
       -h|--help|usage) usage ; return ;;
-      *) usage ; return 1 ;;
+      *) die "$(usage)" ;;
     esac
   done
-  debug "VERBOSE=$VERBOSE"
+
+  "$arg_cmd"
 }
-#main "$@"
-not_after="2023-06-22T00:23:00Z"
-days_left "$not_after" "$(now)"
+trap trap_exit EXIT
+# main "$@"
+make_temp
