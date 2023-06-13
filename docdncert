@@ -1,0 +1,234 @@
+#!/usr/bin/env sh
+
+set -uf
+LC_ALL=C
+
+########################################
+# Global Variables
+########################################
+
+VERBOSE=${VERBOSE:-0}
+
+########################################
+# STDOUT & STDERR Functions
+########################################
+
+usage() {
+  cat << EOF 
+Usage here.
+  * Bullet points
+  * More bullets
+  
+  ## Here is a command option
+
+     $ command goes here 
+
+EOF
+}
+
+out() {
+  if [ "$VERBOSE" -ge 0 ]; then
+    printf %s\\n "$*"
+  fi
+}
+
+warn() {
+  if [ "$VERBOSE" -ge 1 ]; then
+    out "$(color y)[$(now)] WARN: $(color x)$*"
+  fi
+}
+
+info() {
+  if [ "$VERBOSE" -ge 2 ]; then
+    out "$(color g)[$(now)] INFO: $(color x)$*"
+  fi
+}
+
+debug() {
+  if [ "$VERBOSE" -ge 3 ]; then
+    out "$(color w)[$(now)] DEBUG: $(color x)$*"
+  fi
+}
+
+err() {
+  >&2 out "$(color r)[$(now)] ERROR: $(color x)$*"
+}
+
+die() {
+  err "$*"
+  exit 1
+}
+
+color() {
+  _b=$(printf %b '\033[1m') # bold
+  case "$1" in
+    r) printf %b%b "$_b" '\033[33;31m' ;; # red
+    g) printf %b%b "$_b" '\033[33;32m' ;; # green
+    y) printf %b%b "$_b" '\033[33;33m' ;; # yellow
+    w) printf %b%b "$_b" '\033[33;37m' ;; # white
+    x) printf %b%b "$_b" '\033[m' ;;      # reset
+    *) warn "color func usage: 'color [r,g,y,x]'" ; return 1 ;;
+  esac
+}
+
+str_to_line() {
+  sed 's/$/\\n/' "$@" | tr -d '\n'
+}
+
+########################################
+# Math & Time Functions
+########################################
+
+days_left() {
+  minuend=$(date_to_days "$1")
+  subtrahend=$(date_to_days "$2")
+  printf %d\\n $(( minuend - subtrahend ))
+}
+
+now() {
+  TZ="UTC" date +'%Y-%m-%dT%H:%M:%SZ'
+}
+
+date_to_secs() {
+  # GNU date
+  if date -d "$1" '+%s' 2>/dev/null; then
+    info "Using GNU date."
+    return
+  fi
+  
+  # BSD date
+  if date -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" '+%s' 2>/dev/null; then
+    info "Using BSD date."
+    return 
+  fi
+
+  err "::date_to_seconds: Unable to convert time."
+  return 1
+}
+
+date_to_days() {
+  datesecs=$(date_to_secs "$1")
+  onedaysecs=32400
+  printf %d\\n $(( datesecs / onedaysecs ))
+}
+
+is_int() {
+  printf %d "$1" 2>/dev/null
+}
+
+########################################
+# curl Functions
+########################################
+
+build_header() {
+  for h in "$@"; do
+    printf '%s "%s" ' "-H" "$h"
+  done
+}
+
+build_data() {
+  for d in "$@"; do
+    if [ -r "$d" ]; then
+      printf '%s "@%s" ' "-d" "$d"
+    else
+      printf '%s "%s" ' "-d" "$d"
+    fi
+  done
+}
+
+_curl() {
+  method="$1"
+  endpoint="$2"
+  headers="$3"
+  data="$4"
+  response="$(mktemp)"
+  payload="$endpoint"
+  fn_use="_curl <GET|PUT|POST|DELETE> <endpoint> <headers> <data>"
+  ret=""
+
+  debug "_curl::method=$method"
+  debug "_curl::endpoint=$endpoint"
+  debug "_curl::headers=$headers"
+  debug "_curl::data=$data"
+  debug "_curl::response=$response"
+
+  # Check for bare-minimum defaults
+  case "$method" in
+    GET|PUT|POST|DELETE) : ;;
+    *) err "$fn_use" ; die "Invalid HTTP method: $method" ;;
+  esac
+
+  test -n "$endpoint" || die "_curl: must declare an endpoint, $fn_use"
+
+  if [ -n "$data" ]; then
+    payload="${data} ${payload}"
+  fi
+
+  if [ -n "$headers" ]; then
+    payload="${headers} ${payload}"
+  fi
+
+  debug "_curl::payload=$payload"
+
+  if ! ret="$("$CURL_BIN" -s \
+      -o "$response" \
+      -w '%{http_code}' \
+      -X "$method" \
+      "$payload")"; then
+      die "Function curl_get fatal error: $ret"
+  fi
+
+  debug "curl_get::ret=$ret"
+
+  if [ "$ret" -ne 200 ]; then
+    # Return the error code
+    printf %s\\n "$ret"
+    return 1
+  fi
+
+  # Return the path to the json response
+  printf %s\\n "$response"
+
+}
+
+########################################
+# Local Variables
+########################################
+
+#do_api="https://api.digitalocean.com/v2"
+#do_cdn_endpoint="$do_api/cdn/endpoints"
+#do_cert_endpoint="$do_api/certificates"
+#do_api_content_type="application/json"
+
+main() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dns)
+        LE_DNS="$2" 
+        debug "LE_DNS=$LE_DNS"
+        shift 2 ;;
+      --do-token)
+        if ! do_token=$(get_token "$2"); then
+          die "Usage: '--do-token' <string|path>"
+        fi
+        debug "do_token=$do_token"
+        shift 2
+        ;;
+      -v) VERBOSE=1 ; shift ;;
+      -vv) VERBOSE=2 ; shift ;;
+      -vvv|--debug) VERBOSE=3 ; shift ;;
+      --verbose=*)
+        if ! VERBOSE=$(is_int "${1#*=}"); then 
+          die "Usage: '--verbose=<int>'"
+        fi
+        shift ;;
+      -q|--quiet) VERBOSE=-1 ; shift ;;
+      -h|--help|usage) usage ; return ;;
+      *) usage ; return 1 ;;
+    esac
+  done
+  debug "VERBOSE=$VERBOSE"
+}
+#main "$@"
+not_after="2023-06-22T00:23:00Z"
+days_left "$not_after" "$(now)"
