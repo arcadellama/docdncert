@@ -1,22 +1,28 @@
 #!/usr/bin/env sh
 
-set -uf
+set -f
 LC_ALL=C
 
 ########################################
 # Global Variables
 ########################################
 
-VERBOSE=${VERBOSE:-3}
+PRGNAM="docdncert"
+VERBOSE=${VERBOSE:-0}
 DIGITALOCEAN_TOKEN="${DIGITALOCEAN_TOKEN:-}"
-ACME_DNS="${ACME_DNS:-}"
+CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
+LE_EMAIL="${LE_EMAIL:-}"
+RENEWED_LINEAGE="${RENEWED_LINEAGE:-}"
+CERTBOT_BIN="${CERTBOT_BIN:-/usr/local/bin/certbot}"
+CURL_BIN="${CURL_BIN:-/usr/bin/curl}"
+JQ_BIN="${JQ_BIN:-/usr/bin/jq}"
 
 ########################################
 # Trap Exit
 ########################################
 
 trap_exit() {
-  cleanup "$tmpdir"
+  cleanup "$Temp_Dir"
 }
 
 # Usage: files for deletion
@@ -34,12 +40,14 @@ cleanup() {
 # STDOUT & STDERR Functions
 ########################################
 
-usage() {
-  cat << EOF 
-Usage here.
-EOF
+make_temp() {
+  _dir="$Temp_Dir"
+  _rand="$(head /dev/random | cksum | tr ' ' '.')" || { out "$_rand"; return 1; }
+  _out="${_dir}/make_temp.${_rand}"
+  _touch=$(touch "$_out") || { out "$_touch"; return 1; }
+  out "$_out"
 }
-
+  
 out() {
   printf %s\\n "$*"
 }
@@ -87,11 +95,8 @@ color() {
 # I/O Functions
 ########################################
 
-make_temp() {
-  out "$tmpdir/$(mktemp XXXXXXXXXXXXXXXXX)" || die "::make_tmp fail"
-}
-
 path_or_str() {
+  #debug "::path_or_str $*"
   # Is it a file path?
   if [ -r "$1" ]; then
     cat "$1"
@@ -115,18 +120,26 @@ str_to_line() {
   sed 's/$/\\n/' "$@" | tr -d '\n'
 }
 
+generate_name() {
+  # Accepts: domain_name, leaf_cert
+  _name=$(out "$1" | tr '.' '-')
+  _sum=$(cksum "$2" | cut -c1-6)
+  out "${_name}-${_sum}"
+}
+
 ########################################
 # Math & Time Functions
 ########################################
 
 days_left() {
-  minuend=$(date_to_days "$1")
-  subtrahend=$(date_to_days "$2")
-  printf %d\\n $(( minuend - subtrahend ))
+  #debug "::days_left $*"
+  _min=$(date_to_days "$1")
+  _sub=$(date_to_days "$2")
+  printf %d\\n $(( _min - _sub ))
 }
 
 now() {
-  TZ="UTC" date +'%Y-%m-%dT%H:%M:%SZ'
+  TZ="UTC" date '+%Y-%m-%dT%H:%M:%SZ'
 }
 
 date_to_secs() {
@@ -147,9 +160,9 @@ date_to_secs() {
 }
 
 date_to_days() {
-  datesecs=$(date_to_secs "$1")
-  onedaysecs=32400
-  printf %d\\n $(( datesecs / onedaysecs ))
+  _datesecs=$(date_to_secs "$1")
+  _onedaysecs=32400
+  printf %d\\n $(( _datesecs / _onedaysecs ))
 }
 
 is_int() {
@@ -160,154 +173,511 @@ is_int() {
 # curl Functions
 ########################################
 
-build_header() {
-  for h in "$@"; do
-    printf '%s "%s" ' "-H" "$h"
-  done
-}
+http_func() {
+  # Accepts: method, endpoint, data (path to file)
+  # Globals: DIGITALOCEAN_TOKEN, DO_API_Content_Type, CURL_BIN
+  # Returns: Confirmation json with new CDN details
+  _usage="http_func <method> <endpoint> <data>"
+  [ -n "$*" ] || { out "Usage: $_usage" ; return 1; }
+  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
+  _method="$1"
+  _endpoint="$2"
+  _data="$3"
+  _content_type="$DO_API_Content_Type"
+  _auth_bearer="$DIGITALOCEAN_TOKEN"
+  _response="$(make_temp)" || { out "Cannot make tempfile."; return 1; }
+  _ret_ok=""
+  _ret=""
 
-build_data() {
-  for d in "$@"; do
-    if [ -r "$d" ]; then
-      printf '%s "@%s" ' "-d" "$d"
-    else
-      printf '%s "%s" ' "-d" "$d"
-    fi
-  done
-}
-
-_curl() {
-  method="$1"
-  endpoint="$2"
-  headers="$3"
-  data="$4"
-  response="$(make_temp)"
-  payload="$endpoint"
-  fn_use="_curl <GET|PUT|POST|DELETE> <endpoint> <headers> <data>"
-  ret=""
-
-  debug "_curl::method=$method"
-  debug "_curl::endpoint=$endpoint"
-  debug "_curl::headers=$headers"
-  debug "_curl::data=$data"
-  debug "_curl::response=$response"
+  debug "http_func::_method=$_method"
+  debug "http_func::_endpoint=$_endpoint"
+  debug "http_func::_data=$_data"
+  debug "http_func::_content_type=$_content_type"
+  debug "http_func::_auth_bearer=$_auth_bearer"
+  debug "http_func::_response=$_response"
 
   # Check for bare-minimum defaults
-  case "$method" in
-    GET|PUT|POST|DELETE) : ;;
-    *) err "$fn_use" ; die "Invalid HTTP method: $method" ;;
+  [ -x "$CURL_BIN" ] || { out "curl not found in path."; return 1; }
+  [ -n "$DIGITALOCEAN_TOKEN" ] || { out "DIGITGALOCEAN_TOKEN unset"; return 1; }
+  [ -n "$DO_API_Content_Type" ] || { out "DO_API_Content_Type unset"; return 1; }
+  [ -n "$_endpoint" ] || { out "::http_func: no endpoint. Usage: $_usage"; return 1; }
+
+  case "$_method" in
+    GET|PUT) _ret_ok=200 ;;
+    POST) _ret_ok=201 ;;
+    DELETE) _ret_ok=204 ;;
+    usage) out "$_usage" ; return ;;
+    *) out "Usage: $_usage" ; return 1 ;;
   esac
 
-  test -n "$endpoint" || die "_curl: must declare an endpoint, $fn_use"
-
-  if [ -n "$data" ]; then
-    payload="${data} ${payload}"
-  fi
-
-  if [ -n "$headers" ]; then
-    payload="${headers} ${payload}"
-  fi
-
-  debug "_curl::payload=$payload"
-
-  if ! ret="$("$CURL_BIN" -s \
-      -o "$response" \
+  if [ -n "$_data" ]; then
+    _ret="$("$CURL_BIN" -s \
+      -o "$_response" \
       -w '%{http_code}' \
-      -X "$method" \
-      "$payload")"; then
-      die "Function curl_get fatal error: $ret"
+      -X "$_method" \
+      -H "Content-Type: $_content_type" \
+      -H "Authorization: Bearer $_auth_bearer" \
+      -d "@$_data" \
+      "$_endpoint")" || { out "$_ret"; return 1; }
+  else
+    _ret="$("$CURL_BIN" -s \
+      -o "$_response" \
+      -w '%{http_code}' \
+      -X "$_method" \
+      -H "Content-Type: $_content_type" \
+      -H "Authorization: Bearer $_auth_bearer" \
+      "$_endpoint")" || { out "$_ret"; return 1; }
   fi
 
-  debug "curl_get::ret=$ret"
-
-  if [ "$ret" -ne 200 ]; then
+  if [ "$_ret" -ne "$_ret_ok" ]; then
     # Return the error code
-    printf %s\\n "$ret"
+    out "$_ret"
     return 1
   fi
 
   # Return the path to the json response
-  printf %s\\n "$response"
-
+  cat "$_response"
 }
 
 ########################################
-# Program Variables
+# CDN Functions
 ########################################
 
-#do_api="https://api.digitalocean.com/v2"
-#do_cdn_endpoint="$do_api/cdn/endpoints"
-#do_cert_endpoint="$do_api/certificates"
-#do_api_content_type="application/json"
-tmpdir="$(mktemp -d)" || die "Unable to mktemp -d: $?"
-
-########################################
-# Program Functions
-########################################
-
-list() {
-_usage="list [cdn|certs] [<id>|all]"
+cdn() {
+  # Accepts: "list", "update", "help"
+  _usage="cdn [list|update|help]"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in
-    cdn) list_cdn "$2" ;;
-    certs) list_certs "$2" ;;
-    *) die "$_usage" ;;
+    help|usage) out "Usage: $_usage" ; return ;;
+    list) shift ; cdn_list "$@" ;;
+    update) shift ; cdn_update "$@" ;;
+    *) out "$_usage" ; return 1 ;;
   esac
 }
 
-create() {
-_usage="create cert <name> <private_key> <leaf_cert> <cert_chain>"
+cdn_list() {
+  # Accepts: "all", cdn_id, "help"
+  _usage="cdn list [all|id <cdn_id>]"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in
-    cert) shift ; create_cert "$@" ;;
-    *) die "$_usage" ;;
+    help|usage) out "Usage: $_usage" ; return ;;
+    all) cdn_list_all "$@" ;;
+    domain) shift ; cdn_list_by_domain "$@" ;;
+    id) shift ; cdn_list_by_id "$@" ;;
+    *) out "Usage: $_usage" ; return 1;;
   esac
 }
+
+cdn_list_all() {
+  # Globals: DIGITALOCEAN_TOKEN
+  # Returns: json of all cdn endpoints
+  _method="GET"
+  _endpoint="$DO_CDN_Endpoint"
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint") || { out "$_res"; return 1; }
+  out "$_res"
+}
+
+cdn_list_by_id() {
+  # Accepts: cdn_id
+  # Globals: DIGITALOCEAN_TOKEN
+  # Returns: json of all cdn endpoints
+  _usage="cdn list <id>"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
+  _cdn_id="$1"
+  _method="GET"
+  _endpoint="$DO_CDN_Endpoint/$_cdn_id"
+
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint") || { out "$_res"; return 1; }
+
+  out "$_res"
+}
+
+cdn_list_by_domain() {
+  # Accepts: domain_name
+  # Global: DIGITALOCEAN_TOKEN
+  # Returns: cdn_id
+  _domain="$1"
+
+  info "Getting cdn list..."
+  _cdn_list_all=$(cdn list all) || { out "$_cdn_list_all"; return 1; }
+
+  info "Processing list..."
+  _total=$(out "$_cdn_list_all" \
+    | "$JQ_BIN" -r \
+    .meta.total)
+
+  while [ "$_total" -gt 0 ]; do
+    _total=$(( _total - 1 ))
+    _cdn_id=$(out "$_cdn_list_all" \
+      | "$JQ_BIN" -r \
+      .endpoints["$_total"].id)
+
+    _cdn_domain=$(out "$_cdn_list_all" \
+      | "$JQ_BIN" -r \
+      .endpoints["$_total"].custom_domain) 
+
+    if [ "$_domain" = "$_cdn_domain" ]; then
+      out "$_cdn_id"
+      return
+    fi
+  done
+
+  out "Couldn't find CDN with endpoint $_domain"
+  return 1
+}
+
+cdn_update() {
+  # Accepts: cdn_id, certificate_id
+  # Globals: DIGITALOCEAN_TOKEN
+  # Returns: Confirmation json with new CDN details
+  _usage="cdn update <cdn_id> <certificate_id>"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
+  _cdn_id="$1" 
+  _cert_id="$2"
+  _method="PUT"
+  _endpoint="$DO_CDN_Endpoint/$_cdn_id"
+  _data="$(make_temp)" || { out "Cannot make temp file."; return 1; }
+
+  cat << EOF > "$_data"
+  { "certificate_id": "$_cert_id" }
+EOF
+
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint" \
+    "$_data") || { out "$_res"; return 1; }
+
+  out "$_res"
+}
+
+########################################
+# Certificate Functions
+########################################
+
+cert() {
+  # Accepts: list, issue, upload, help
+  _usage="cert [list|issue|upload]"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in
+    usage) out "Usage: $_usage" ; return ;;
+    list) shift ; cert_list "$@" ;;
+    issue) shift ; cert_issue "$@" ;;
+    upload) shift ; cert_upload "$@" ;;
+    *) out "Usage: $_usage"; return 1 ;;
+  esac
+}
+
+cert_list() {
+  # Accepts: all, cert_id, help
+  _usage="cert list [all|id <cert_id>]"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in
+    help|usage) out "Usage: $_usage" ; return ;;
+    all) cert_list_all ;;
+    id) cert_list_by_id "$2" ;;
+    *) out "Usage: $_usage" ; return 1 ;;
+  esac
+}
+
+cert_issue() {
+  # Accepts: domain_name 
+  # Globals: CLOUDFLARE_API_TOKEN, LE_EMAIL, CERTBOT_BIN
+  # Returns: directory with certs, >1 if error
+  _usage="cert issue <domain_name>"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
+  _domain_name="$1" 
+  _deploy="$(make_temp)" || { out "$_deploy"; return 1; }
+  _cf_ini="$(make_temp)" || { out "$_cf_ini"; return 1; }
+  _cert_dir="$(make_temp)" || { out "$_cert_dir"; return 1; }
+
+  [ -x "$CERTBOT_BIN" ] || { out "certbot not found in path"; return 1; }
+  [ -n "$CLOUDFLARE_API_TOKEN" ] || { out "CLOUDFLARE_API_TOKEN unset."; return 1; }
+  [ -n "$LE_EMAIL" ] || { out "LE_EMAIL not set."; return 1; }
+
+  # Create deploy script
+  # shellcheck disable=SC2016
+  printf %s\\n '#!/usr/bin/env sh\necho "$RENEWED_LINEAGE" > "$1"' >> "$_deploy"
+
+  # Create Cloudflare API INI
+  out "dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN" > "$_cf_ini"
+
+  # Issue Certificate
+  "$CERTBOT_BIN" \
+    certonly \
+    --force-renew \
+    --non-interactive \
+    --agree-tos \
+    --dns-cloudflare \
+    --dns-cloudflare-credentials "$_cf_ini" \
+    -d "$_domain_name" \
+    -m "$LE_EMAIL" \
+    --deploy-hook \""$_deploy" "$_cert_dir"\" || return 1
+
+  cat "$_cert_dir" 
+}
+
+cert_upload() {
+  # Accepts: cert_name, private_key, leaf_certificate, certificate_chain
+  # Globals: DIGITALOCEAN_TOKEN
+  # Returns: New certificate_id
+  _usage="cert upload <name> <private_key> <leaf_cert> <cert_chain>"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in usage) out "Usage: $_usage" ;; esac
+  _cert_name="$1"
+  _private_key="$2"
+  _leaf_cert="$3"
+  _cert_chain="$4"
+  _method="POST"
+  _endpoint="$DO_Cert_Endpoint"
+  _data="$(make_temp)" || { out "Cannot make temp file."; return 1; }
+
+  cat << EOF > "$_data"
+  {
+    "name": "$_cert_name",
+    "type": "custom",
+    "private_key": "$_private_key",
+    "leaf_certificate": "$_leaf_cert",
+    "certificate_chain": "$_cert_chain"
+  }
+EOF
+
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint" \
+    "$_data") || die "::cert_upload HTTP Error Code: $_res"
+
+  out "$_res"
+}
+
+cert_list_all() {
+  # Returns: json of all certificates
+  _method="GET"
+  _endpoint="$DO_Cert_Endpoint"
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint") || die "::cdn_list_all HTTP Error Code: $_res"
+  out "$_res"
+}
+
+cert_list_by_id() {
+  # Accepts: cert_id
+  # Globals: DIGITALOCEAN_TOKEN
+  # Returns: json of requested cert
+  _usage="cert list <id>"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
+  _cert_id="$1"
+  _method="GET"
+  _endpoint="$DO_Cert_Endpoint/$_cert_id"
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint") || die "::cdn_list_by_id HTTP Error Code: $_res"
+  out "$_res"
+}
+
+########################################
+# Renew Functions
+########################################
 
 renew() {
-_usage="renew [<cdn_id>|all]"
+  # Accepts: all, domain_name
+  _usage="renew [all|domain|id|hook]"
+  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in
+    help|usage) out "Usage: $_usage" ; return ;;
     all) renew_all ;;
-    *) renew_cdn "$1" ;;
+    domain) renew_by_domain "$2" ;;
+    hook) shift ; renew_by_hook "$@" ;;
+    id) renew_by_id "$2" ;;
+    *) out "Usage: $_usage" ; return 1 ;;
   esac
 }
 
+renew_all() {
+  # Globals: JQ_BIN
+  # Returns: 
+  _cdn="" _total="" _cdn_id=""
+  _renew=""
+
+  [ -x "$JQ_BIN" ] || { out "jq not found in path."; return 1; }
+
+  info "Getting cdn list..."
+  _cdn_list_all=$(cdn list all) || die "$_cdn_list_all"
+
+  info "Processing list..."
+  _total=$(out "$_cdn_list_all" \
+    | "$JQ_BIN" -r \
+    .meta.total)
+
+  while [ "$_total" -gt 0 ]; do
+    _total=$(( _total - 1 ))
+    _cdn_id=$(out "$_cdn_list_all" \
+      | "$JQ_BIN" -r \
+      .endpoints["$_total"].id)
+
+    info "Found cdn $_cdn_id; attempting to renew..."
+    _renew=$(renew id "$_cdn_id") || { out "$_renew"; return 1; }
+  done
+}
+
+renew_by_hook(){
+  # Accepts: renewed_lineage, renewed_domains
+  # Globals: LE_Private_Key, LE_Leaf_Certificate, LE_Chain_Certificate
+  _cert_dir="$1"
+  _renewed_domains="$2"
+  _domain=""
+  _upload=""
+
+  # Getting first domain if more than one issued
+  for _d in $_renewed_domains; do
+    _domain="$_d" && break
+    return 1
+  done
+
+  _private_key="$_cert_dir/$LE_Private_Key"
+  _leaf_cert="$_cert_dir/$LE_Leaf_Certificate"
+  _fullchain="$_cert_dir/$LE_Chain_Certificate"
+  _cert_name=$(generate_name "$_domain" "$_leaf_cert") || return 1
+
+  info "Uploading new cert."
+  _upload=$(cert upload \
+    "$_cert_name" \
+    "$(str_to_line "$_private_key")" \
+    "$(str_to_line "$_leaf_cert")" \
+    "$(str_to_line "$_fullchain")") || { out "$_upload"; return 1; }
+
+  _upload_id=$(out "$_upload" \
+    | "$JQ_BIN" -r \
+    .certificate.id)
+
+}
+
+renew_by_domain() {
+  # Globals: JQ_BIN
+  _domain="$1"
+  _cdn="" _total="" _cdn_id="" _cdn_domain=""
+  _renew=""
+
+}
+
+renew_by_id() {
+  # Global: JQ_BIN
+  # Accepts: cdn_id
+  _cdn_id="$1"
+  _cdn=""
+  _cert_id="" _domain=""
+  _cert="" _cert_expiry=""
+  _upload="" _upload_id=""
+  _update=""
+
+  [ -x "$JQ_BIN" ] || { out "jq not found in path."; return 1; }
+
+  _cdn=$(cdn list id "$_cdn_id") || { out "$_cdn"; return 1; }
+  
+  _cert_id=$(out "$_cdn" \
+    | "$JQ_BIN" -r \
+    .endpoint.certificate_id)
+
+  _domain=$(out "$_cdn" \
+    | "$JQ_BIN" -r \
+    .endpoint.custom_domain)
+
+  _cert=$(cert list id "$_cert_id") || { out "$_cert"; return 1; }
+
+  _cert_expiry=$(out "$_cert" \
+    | "$JQ_BIN" -r \
+    .certificate.not_after)
+
+  # Check if more than 30 days left on expiration
+  if [ "$(days_left "$_cert_expiry" "$(now)")" -gt 30 ]; then
+    info "More than 30 days left on $_domain certificates. Skipping."
+    return
+  fi
+
+  info "Less than 30 days left on $_domain certificate. Renewing."
+  _cert_dir=$(cert issue "$_domain") || { out "$_cert_dir"; return 1; }
+
+
+  info "Updating $_domain cdn with new certificate."
+  _update=$(cdn update "$_cdn_id" "$_upload_id") || { out "$_update"; return 1; }
+
+  #info "Deleting old certificate."
+  #_del=$(cert delete "$_cert_id") || die "$_del"
+}
+
+########################################
+# Runtime Variables
+########################################
+
+Temp_Dir="$(mktemp -d 2>/dev/null)" || Temp_Dir="/tmp/docdncert"
+DO_API="https://api.digitalocean.com/v2"
+DO_CDN_Endpoint="$DO_API/cdn/endpoints"
+DO_Cert_Endpoint="$DO_API/certificates"
+DO_API_Content_Type="application/json"
+LE_Cert_Dir="${RENEWED_LINEAGE:-}"
+LE_Private_Key="privkey.pem"
+LE_Leaf_Certificate="cert.pem"
+LE_Chain_Certificate="fullchain.pem"
+
+########################################
+# Main Function
+########################################
+
 main() {
-  arg_cmd=""
+  _usage="docdncert [cdn|cert|renew] help"
+  _arg_cmd=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      # Commands
-      renew|list|create)
-        [ -n "$arg_cmd" ] || die "$(usage)"
-        arg_cmd="$1 $2"
-        debug "arg_cmd=$arg_cmd"
-        shift 2 ;;
+      
       # Flags
-      --dns)
-        ACME_DNS="$2" 
-        shift 2 ;;
-      --do-token)
-        if ! do_token=$(path_or_str "$2"); then
-          die "Usage: '--do-token' <string|path>"
-        fi
-        debug "do_token=$do_token"
-        shift 2
-        ;;
+
+      -e|--export) export "${2?}"; shift 2 ;;
+      --export=*) export "${1#*=}" ; shift ;;
+      -m|--email) LE_EMAIL="$2" ; shift 2 ;;
+      --email=*) LE_EMAIL="${1#*=}" ; shift ;;
+      --cf-token) CLOUDFLARE_API_TOKEN="$2" ; shift 2 ;;
+      --cf-token=*) CLOUDFLARE_API_TOKEN="${1#*=}" ; shift ;;
+      --do-token) DIGITALOCEAN_TOKEN=$(path_or_str "$2"); shift 2 ;;
+      --do-token=*) DIGITALOCEAN_TOKEN=$(path_or_str "${1#*=}"); shift ;;
+      --certbot) CERTBOT_BIN="$2" ; shift 2 ;;
+      --certbot=*) CERTBOT_BIN="${1#*=}" ; shift ;;
+      --curl) CURL_BIN="$2" ; shift 2 ;;
+      --curl=*) CURL_BIN="${1#*=}" ; shift ;;
+      --jq) JQ_BIN="$2" ; shift 2 ;;
+      --jq=*) JQ_BIN="${1#*=}" ; shift ;;
+      
       # Logging / Usage
+
       -v) VERBOSE=1 ; shift ;;
       -vv) VERBOSE=2 ; shift ;;
       -vvv|--debug) VERBOSE=3 ; shift ;;
-      --verbose)
-        if ! VERBOSE=$(is_int "$2"); then 
-          die "Usage: '--verbose=<int>'"
-        fi
-        shift 2 ;;
+      --verbose) VERBOSE="$1" ; shift ;;
+      --verbose=*) VERBOSE="${1#*=}" ; shift ;;
       -q|--quiet) VERBOSE=-1 ; shift ;;
-      -h|--help|usage) usage ; return ;;
-      *) die "$(usage)" ;;
+      -h|--help) out "Usage: $_usage" ; return ;;
+      -*) out "Usage: $_usage" ; return 1 ;;
+      *) arg_cmd="$arg_cmd $1" ; shift ;;
     esac
   done
+  
+  # Commands
+  # Creating an array, globbing is intentional
+  # shellcheck disable=SC2086
+  set -- $_arg_cmd
 
-  "$arg_cmd"
+  case "$1" in
+    cdn|cert|renew) "$@" ;;
+    *) out "Usage: $_usage" ; return 1 ;;
+  esac
+
 }
 trap trap_exit EXIT
-# main "$@"
-make_temp
+#main "$@"
+echo "$LE_Cert_Dir"
