@@ -21,6 +21,7 @@ CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
 LE_EMAIL="${LE_EMAIL:-}"
 CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-cloudflare}"
 CERTBOT_STAGING=false
+CERTBOT_FORCE=false
 
 # External Dependencies
 CERTBOT_BIN="${CERTBOT_BIN:-$(command -v certbot)}"
@@ -236,7 +237,9 @@ http_func() {
 
   if [ "$_ret" -ne "$_ret_ok" ]; then
     # Return the error code
-    out "$_ret"
+    out "Error with $_method to $_endpoint"
+    out "HTTP Error Code: $_ret"
+    cat "$_response"
     return 1
   fi
 
@@ -278,6 +281,7 @@ cdn_get() {
   out "$_res"
 }
 
+# TODO: a loop to ensure the update was successfull, DO api is not reliable
 cdn_update() {
   # Accepts: cdn_id, certificate_id
   # Globals: DIGITALOCEAN_TOKEN
@@ -465,24 +469,24 @@ renew_all() {
   _cdn="" _total="" _cdn_id=""
   _renew=""
 
-  [ -x "$JQ_BIN" ] || { out "jq not found in path."; return 1; }
+  [ -x "$JQ_BIN" ] || { err "jq not found in path."; return 1; }
 
   info "Getting cdn list..."
-  _cdn_list_all=$(cdn list) || { out "$_cdn_list_all"; return 1; }
+  _cdn_list_all=$(cdn list) || { err "$_cdn_list_all"; return 1; }
 
   info "Processing list..."
   _total=$(out "$_cdn_list_all" \
     | "$JQ_BIN" -r \
-    .meta.total) || { out "::renew_all: $_total"; return 1; }
+    .meta.total) || { err "$_total"; return 1; }
 
   while [ "$_total" -gt 0 ]; do
     _total=$(( _total - 1 ))
     _cdn_id=$(out "$_cdn_list_all" \
       | "$JQ_BIN" -r \
-      .endpoints["$_total"].id) || { out "$_cdn_id"; return 1; }
+      .endpoints["$_total"].id) || { err "$_cdn_id"; return 1; }
 
     info "Found cdn $_cdn_id; attempting to renew..."
-    _renew=$(renew "$_cdn_id") || { out "$_renew"; return 1; }
+    _renew=$(renew "$_cdn_id") || { err "$_renew"; return 1; }
     info "$_renew"
   done
 }
@@ -521,21 +525,28 @@ renew_by_id() {
 
   # Check if more than 30 days left on expiration
   # 30 days = 2592000 seconds
-  _cert_expiry=$(date_to_secs "$_cert_expiry") || { out "$_cert_expiry"; return 1; }
-  _now=$(date_to_secs "$(now)") || { out "$_now"; return 1; }
-  if [ $(( _cert_expiry - _now )) -gt 30 ]; then
-    out "More than 30 days left on $_domain certificates. Skipping."
-    return
+  if ! "$CERTBOT_FORCE"; then
+    _cert_expiry=$(date_to_secs "$_cert_expiry") || { out "$_cert_expiry"; return 1; }
+    _now=$(date_to_secs "$(now)") || { out "$_now"; return 1; }
+    if [ $(( _cert_expiry - _now )) -gt 30 ]; then
+      out "More than 30 days left on $_domain certificates. Skipping."
+      return
+    fi
+    out "Less than 30 days left on $_domain certificate. Renewing."
   fi
 
-  info "Less than 30 days left on $_domain certificate. Renewing."
-  _cert_dir=$(cert issue "$_dns_plugin" "$_domain") || { out "$_cert_dir"; return 1; }
+  # Issue a new certificate with Certbot
+  if ! _cert_dir=$(cert issue "$_dns_plugin" "$_domain"); then
+    out "$_cert_dir"
+    return 1
+  fi
+
   _private_key="$_cert_dir/$LE_Private_Key"
   _leaf_cert="$_cert_dir/$LE_Leaf_Certificate"
   _fullchain="$_cert_dir/$LE_Chain_Certificate"
   _cert_name=$(make_certname "$_domain" "$_leaf_cert") || { out "$_cert_name"; return 1; }
 
-  info "Uploading new cert."
+  out "Uploading new cert."
   _upload=$(cert upload \
     "$_cert_name" \
     "$(replace_newline "$_private_key")" \
@@ -546,9 +557,22 @@ renew_by_id() {
     | "$JQ_BIN" -r \
     .certificate.id) || { out "$_upload_id"; return 1; }
 
-  _update=$(cdn update "$_cdn_id" "$_upload_id") || { out "$_update"; return 1; }
+  # Update CDN with new certificate id
+  out "Updating $_cdn_id with new certificate $_upload_id..."
+  if ! _update=$(cdn update "$_cdn_id" "$_upload_id"); then
+    out "$_update"
+    return 1
+  fi
+  out "Updated $_cdn_id."
 
-  _del=$(cert delete "$_cert_id") || { out "$_del"; return 1; }
+#   # Delete old certificate
+#   out "Deleting old certificate"
+#   if ! _del=$(cert delete "$_cert_id"); then
+#     out "$_del"
+#     return 1
+#   fi
+#   out "Deleted old certificate: $_cert_id."
+
 }
 
 ########################################
@@ -633,6 +657,7 @@ main() {
       --dns-plugin=*) CERTBOT_DNS_PLUGIN="${1#*=}" ; shift ;;
       --certbot) CERTBOT_BIN="$2" ; shift 2 ;;
       --certbot=*) CERTBOT_BIN="${1#*=}" ; shift ;;
+      --force) CERTBOT_FORCE=true ; shift ;;
       --staging) CERTBOT_STAGING=true ; shift ;;
       --curl) CURL_BIN="$2" ; shift 2 ;;
       --curl=*) CURL_BIN="${1#*=}" ; shift ;;
