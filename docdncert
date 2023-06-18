@@ -249,21 +249,11 @@ http_func() {
 ########################################
 
 cdn_list() {
-  # Accepts: "all", cdn_id, "help"
-  _usage="cdn list [all|id <cdn_id>]"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
-  case "$1" in
-    help|usage) out "Usage: $_usage" ; return ;;
-    all) cdn_list_all "$@" ;;
-    domain) shift ; cdn_list_by_domain "$@" ;;
-    id) shift ; cdn_list_by_id "$@" ;;
-    *) out "Usage: $_usage" ; return 1;;
-  esac
-}
-
-cdn_list_all() {
+  # Accepts: "help"
   # Globals: DIGITALOCEAN_TOKEN
   # Returns: json of all cdn endpoints
+  _usage="cdn list [help]"
+  case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
   _method="GET"
   _endpoint="$DO_CDN_Endpoint"
   _res=$(http_func \
@@ -272,54 +262,20 @@ cdn_list_all() {
   out "$_res"
 }
 
-cdn_list_by_id() {
+cdn_get() {
   # Accepts: cdn_id
   # Globals: DIGITALOCEAN_TOKEN
   # Returns: json of all cdn endpoints
-  _usage="cdn list <id>"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
-  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
+  _usage="cdn get <id>"
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
   _cdn_id="$1"
   _method="GET"
   _endpoint="$DO_CDN_Endpoint/$_cdn_id"
-
   _res=$(http_func \
     "$_method" \
     "$_endpoint") || { out "$_res"; return 1; }
-
   out "$_res"
-}
-
-cdn_list_by_domain() {
-  # Accepts: domain_name
-  # Global: DIGITALOCEAN_TOKEN
-  # Returns: cdn_id
-  _domain="$1"
-
-  _cdn_list_all=$(cdn list all) || { out "$_cdn_list_all"; return 1; }
-
-  _total=$(out "$_cdn_list_all" \
-    | "$JQ_BIN" -r \
-    .meta.total) || { out "$_total"; return 1; }
-
-  while [ "$_total" -gt 0 ]; do
-    _total=$(( _total - 1 ))
-    _cdn_id=$(out "$_cdn_list_all" \
-      | "$JQ_BIN" -r \
-      .endpoints["$_total"].id)
-
-    _cdn_domain=$(out "$_cdn_list_all" \
-      | "$JQ_BIN" -r \
-      .endpoints["$_total"].custom_domain) 
-
-    if [ "$_domain" = "$_cdn_domain" ]; then
-      out "$_cdn_id"
-      return
-    fi
-  done
-
-  out "Couldn't find CDN with endpoint $_domain"
-  return 1
 }
 
 cdn_update() {
@@ -472,7 +428,7 @@ cert_upload() {
   # Returns: New certificate_id
   _usage="cert upload <name> <private_key> <leaf_cert> <cert_chain>"
   [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
-  case "$1" in usage) out "Usage: $_usage" ;; esac
+  case "$1" in help|usage) out "Usage: $_usage" ;; esac
   _cert_name="$1"
   _private_key="$2"
   _leaf_cert="$3"
@@ -512,7 +468,7 @@ renew_all() {
   [ -x "$JQ_BIN" ] || { out "jq not found in path."; return 1; }
 
   info "Getting cdn list..."
-  _cdn_list_all=$(cdn list all) || { out "$_cdn_list_all"; return 1; }
+  _cdn_list_all=$(cdn list) || { out "$_cdn_list_all"; return 1; }
 
   info "Processing list..."
   _total=$(out "$_cdn_list_all" \
@@ -526,13 +482,17 @@ renew_all() {
       .endpoints["$_total"].id) || { out "$_cdn_id"; return 1; }
 
     info "Found cdn $_cdn_id; attempting to renew..."
-    _renew=$(renew id "$_cdn_id") || { out "$_renew"; return 1; }
+    _renew=$(renew "$_cdn_id") || { out "$_renew"; return 1; }
+    info "$_renew"
   done
 }
 
 renew_by_id() {
   # Global: JQ_BIN, CERTBOT_DNS_PLUGIN
   # Accepts: cdn_id
+  _usage="renew <cdn_id>"
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
   _cdn_id="$1"
   _dns_plugin="$CERTBOT_DNS_PLUGIN"
   _cdn=""
@@ -543,7 +503,7 @@ renew_by_id() {
 
   [ -x "$JQ_BIN" ] || { out "jq not found in path."; return 1; }
 
-  _cdn=$(cdn list id "$_cdn_id") || { out "$_cdn"; return 1; }
+  _cdn=$(cdn get "$_cdn_id") || { out "$_cdn"; return 1; }
   
   _cert_id=$(out "$_cdn" \
     | "$JQ_BIN" -r \
@@ -606,7 +566,7 @@ LE_Leaf_Certificate="cert.pem"
 LE_Chain_Certificate="fullchain.pem"
 
 #######################################
-# Primary Functions
+# Entrypoint Functions
 #######################################
 
 cdn() {
@@ -639,15 +599,18 @@ cert() {
 
 renew() {
   # Accepts: all, domain_name
-  _usage="renew [all|domain|id|hook]"
+  _usage="renew [all|<cdn_id>]"
   [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in
     help|usage) out "Usage: $_usage" ; return ;;
     all) renew_all ;;
-    *) [ -n "$2" ] && renew_by_id "$2" ;;
+    *) renew_by_id "$1" ;;
   esac
-  out "Usage: $_usage" ; return 1
 }
+
+#######################################
+# Main Function
+#######################################
 
 main() {
   _usage="$PRGNAM [cdn|cert|renew] help"
