@@ -20,6 +20,7 @@ CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
 # Let's Encrypt/Certbot Variables
 LE_EMAIL="${LE_EMAIL:-}"
 CERTBOT_DNS_PLUGIN="${CERTBOT_DNS_PLUGIN:-cloudflare}"
+CERTBOT_STAGING=false
 
 # External Dependencies
 CERTBOT_BIN="${CERTBOT_BIN:-$(command -v certbot)}"
@@ -352,31 +353,53 @@ EOF
 
 cert_list() {
   # Accepts: all, cert_id, help
-  _usage="cert list [all|id <cert_id>]"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
-  case "$1" in
-    help|usage) out "Usage: $_usage" ; return ;;
-    all) cert_list_all ;;
-    id) cert_list_by_id "$2" ;;
-    *) out "Usage: $_usage" ; return 1 ;;
-  esac
+  # Returns: json of all certificates
+  _usage="cert list" 
+  case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
+  _method="GET"
+  _endpoint="$DO_Cert_Endpoint"
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint") || { out "$_res"; return 1; }
+  out "$_res"
+}
+
+cert_get() {
+  # Accepts: cert_id
+  # Globals: DIGITALOCEAN_TOKEN
+  # Returns: json of requested cert
+  _usage="cert get <cert_id>"
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
+  _cert_id="$1"
+  _method="GET"
+  _endpoint="$DO_Cert_Endpoint/$_cert_id"
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint") || { out "$_res"; return 1; }
+  out "$_res"
 }
 
 cert_delete() {
-  # Accepts: all, cert_id, help
-  _usage="cert delete [id <cert_id>]"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
-  case "$1" in
-    help|usage) out "Usage: $_usage" ; return ;;
-    id) cert_delete_by_id "$2" ;;
-    *) out "Usage: $_usage" ; return 1 ;;
-  esac
+  # Accepts: cert_id
+  # Globals: DIGITALOCEAN_TOKEN
+  # Returns: 0 if successful, HTTP code if an error
+  _usage="cert delete <id>"
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
+  _cert_id="$1"
+  _method="DELETE"
+  _endpoint="$DO_Cert_Endpoint/$_cert_id"
+  _res=$(http_func \
+    "$_method" \
+    "$_endpoint") || { out "$_res"; return 1; }
+  out "$_cert_id deleted."
 }
 
 cert_issue() {
   # Accepts: cloudflare %%future dns plugins here?%% 
   _usage="cert issue <dns_plugin> <domain_name>"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in
     help|usage) out "Usage: $_usage" ; return ;;
     cloudflare) cert_issue_dns_cloudflare "$2" ;;
@@ -389,7 +412,7 @@ cert_issue_dns_cloudflare() {
   # Globals: CLOUDFLARE_API_TOKEN, LE_EMAIL, CERTBOT_BIN
   # Returns: directory with certs, >1 if error
   _usage="cert issue cloudflare <domain_name>"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
   _domain_name="$1" 
   _deploy="$(make_temp)" || { out "$_deploy"; return 1; }
@@ -412,19 +435,34 @@ cert_issue_dns_cloudflare() {
   # Export hook return variable
   export DCC_HOOK_RETURN="$_cert_dir"
 
-  # Issue Certificate
-  "$CERTBOT_BIN" \
-    certonly \
-    --staging \
-    --force-renew \
-    --non-interactive \
-    --agree-tos \
-    --dns-cloudflare \
-    --dns-cloudflare-credentials "$_cf_ini" \
-    -d "$_domain_name" \
-    -m "$LE_EMAIL" \
-    --deploy-hook "$_deploy" || return 1
+  if "$CERTBOT_STAGING"; then
+    # Issue Certificate
+    "$CERTBOT_BIN" \
+      certonly \
+      --staging \
+      --force-renew \
+      --non-interactive \
+      --agree-tos \
+      --dns-cloudflare \
+      --dns-cloudflare-credentials "$_cf_ini" \
+      -d "$_domain_name" \
+      -m "$LE_EMAIL" \
+      --deploy-hook "$_deploy" || return 1
+  else
+    # Issue Certificate
+    "$CERTBOT_BIN" \
+      certonly \
+      --force-renew \
+      --non-interactive \
+      --agree-tos \
+      --dns-cloudflare \
+      --dns-cloudflare-credentials "$_cf_ini" \
+      -d "$_domain_name" \
+      -m "$LE_EMAIL" \
+      --deploy-hook "$_deploy" || return 1
+  fi
 
+  # Export the RENEWED_DOMAINS directory
   cat "$_cert_dir" 
 }
 
@@ -459,48 +497,6 @@ EOF
     "$_data") || { out "$_res"; return 1; }
 
   out "$_res"
-}
-
-cert_list_all() {
-  # Returns: json of all certificates
-  _method="GET"
-  _endpoint="$DO_Cert_Endpoint"
-  _res=$(http_func \
-    "$_method" \
-    "$_endpoint") || { out "$_res"; return 1; }
-  out "$_res"
-}
-
-cert_list_by_id() {
-  # Accepts: cert_id
-  # Globals: DIGITALOCEAN_TOKEN
-  # Returns: json of requested cert
-  _usage="cert list <id>"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
-  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
-  _cert_id="$1"
-  _method="GET"
-  _endpoint="$DO_Cert_Endpoint/$_cert_id"
-  _res=$(http_func \
-    "$_method" \
-    "$_endpoint") || { out "$_res"; return 1; }
-  out "$_res"
-}
-
-cert_delete_by_id() {
-  # Accepts: cert_id
-  # Globals: DIGITALOCEAN_TOKEN
-  # Returns: 0 if successful, HTTP code if an error
-  _usage="cert delete <id>"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
-  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
-  _cert_id="$1"
-  _method="DELETE"
-  _endpoint="$DO_Cert_Endpoint/$_cert_id"
-  _res=$(http_func \
-    "$_method" \
-    "$_endpoint") || { out "$_res"; return 1; }
-  out "$_cert_id deleted."
 }
 ########################################
 # Renew Functions
@@ -633,11 +629,12 @@ cdn() {
 
 cert() {
   # Accepts: list, issue, upload, help
-  _usage="cert [list|issue|upload]"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  _usage="cert [list|get|issue|upload]"
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in
-    usage) out "Usage: $_usage" ; return ;;
+    help|usage) out "Usage: $_usage" ; return ;;
     list) shift ; cert_list "$@" ;;
+    get) shift ; cert_get "$@" ;;
     issue) shift ; cert_issue "$@" ;;
     upload) shift ; cert_upload "$@" ;;
     delete) shift; cert_delete "$@" ;;
@@ -680,6 +677,7 @@ main() {
       --dns-plugin=*) CERTBOT_DNS_PLUGIN="${1#*=}" ; shift ;;
       --certbot) CERTBOT_BIN="$2" ; shift 2 ;;
       --certbot=*) CERTBOT_BIN="${1#*=}" ; shift ;;
+      --staging) CERTBOT_STAGING=true ; shift ;;
       --curl) CURL_BIN="$2" ; shift 2 ;;
       --curl=*) CURL_BIN="${1#*=}" ; shift ;;
       --jq) JQ_BIN="$2" ; shift 2 ;;
