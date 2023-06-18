@@ -498,6 +498,7 @@ EOF
 
   out "$_res"
 }
+
 ########################################
 # Renew Functions
 ########################################
@@ -529,13 +530,6 @@ renew_all() {
   done
 }
 
-renew_by_domain() {
-  # Accepts: domain_name
-  _domain_name="$1"
-  _cdn_id=$(cdn list domain "$_domain_name") || { out "$_cdn_id"; return 1; }
-  _renew=$(renew id "$_cdn_id") || { out "$_renew"; return 1; }
-}
-
 renew_by_id() {
   # Global: JQ_BIN, CERTBOT_DNS_PLUGIN
   # Accepts: cdn_id
@@ -559,7 +553,7 @@ renew_by_id() {
     | "$JQ_BIN" -r \
     .endpoint.custom_domain) || { out "$_domain"; return 1; }
 
-  _cert=$(cert list id "$_cert_id") || { out "$_cert"; return 1; }
+  _cert=$(cert get "$_cert_id") || { out "$_cert"; return 1; }
 
   _cert_expiry=$(out "$_cert" \
     | "$JQ_BIN" -r \
@@ -617,12 +611,13 @@ LE_Chain_Certificate="fullchain.pem"
 
 cdn() {
   # Accepts: "list", "update", "help"
-  _usage="cdn [list|update|help]"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  _usage="cdn [list|get|update|help]"
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in
-    help|usage) out "Usage: $_usage" ; return ;;
     list) shift ; cdn_list "$@" ;;
+    get) shift ; cdn_get "$@" ;;
     update) shift ; cdn_update "$@" ;;
+    help|usage) out "Usage: $_usage" ; return ;;
     *) out "$_usage" ; return 1 ;;
   esac
 }
@@ -645,15 +640,13 @@ cert() {
 renew() {
   # Accepts: all, domain_name
   _usage="renew [all|domain|id|hook]"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in
     help|usage) out "Usage: $_usage" ; return ;;
     all) renew_all ;;
-    domain) renew_by_domain "$2" ;;
-    hook) shift ; renew_by_hook "$@" ;;
-    id) renew_by_id "$2" ;;
-    *) out "Usage: $_usage" ; return 1 ;;
+    *) [ -n "$2" ] && renew_by_id "$2" ;;
   esac
+  out "Usage: $_usage" ; return 1
 }
 
 main() {
