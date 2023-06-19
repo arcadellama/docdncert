@@ -6,7 +6,7 @@ RUN apk --no-cache add -f \
   curl \
   jq
 
-COPY ./docdncert /usr/local/bin/docdncert
-RUN chmod +x /usr/local/bin/docdncert
+COPY ./ /
+RUN chmod +x /docdncert
 
-ENTRYPOINT ["/usr/local/bin/docdncert"]
+ENTRYPOINT ["/docdncert"]
