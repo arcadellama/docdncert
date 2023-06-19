@@ -9,6 +9,7 @@ LC_ALL=C
 
 # Program variables
 PRGNAM="docdncert"
+VERSION="0.1.0"
 VERBOSE="${VERBOSE:-0}"
 DAEMON_MODE="${DAEMON_MODE:-false}"
 DEBUG_MODE="${DEBUG_MODE:-false}"
@@ -702,7 +703,8 @@ renew() {
 #######################################
 
 main() {
-  _usage="$PRGNAM [cdn|cert|renew] help"
+  _usage="$PRGNAM - $VERSION
+[cdn|cert|renew] help"
   _arg_cmd=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
