@@ -382,6 +382,7 @@ cert_issue_dns_cloudflare() {
   _deploy="$(make_temp)" || { out "$_deploy"; return 1; }
   _cf_ini="$(make_temp)" || { out "$_cf_ini"; return 1; }
   _cert_dir="$(make_temp)" || { out "$_cert_dir"; return 1; }
+  _certbot=""
 
   [ -x "$CERTBOT_BIN" ] || { out "certbot not found in path"; return 1; }
   [ -n "$CLOUDFLARE_API_TOKEN" ] || { out "CLOUDFLARE_API_TOKEN unset."; return 1; }
@@ -389,8 +390,7 @@ cert_issue_dns_cloudflare() {
 
   # Create deploy script
   # shellcheck disable=SC2016
-  printf %s\\n \
-    '#!/usr/bin/env sh\necho "$RENEWED_LINEAGE" > "$DCC_HOOK_RETURN"' > "$_deploy"
+  printf '#!/usr/bin/env sh\necho "$RENEWED_LINEAGE" > "$DCC_HOOK_RETURN"' > "$_deploy"
   chmod +x "$_deploy"
 
   # Create Cloudflare API INI
@@ -401,7 +401,7 @@ cert_issue_dns_cloudflare() {
 
   if "$CERTBOT_STAGING"; then
     # Issue Certificate
-    "$CERTBOT_BIN" \
+    _certbot=$("$CERTBOT_BIN" \
       certonly \
       --staging \
       --force-renew \
@@ -411,10 +411,10 @@ cert_issue_dns_cloudflare() {
       --dns-cloudflare-credentials "$_cf_ini" \
       -d "$_domain_name" \
       -m "$LE_EMAIL" \
-      --deploy-hook "$_deploy" || return 1
+      --deploy-hook "$_deploy") || { out "$_certbot"; return 1; }
   else
     # Issue Certificate
-    "$CERTBOT_BIN" \
+    _certbot=$("$CERTBOT_BIN" \
       certonly \
       --force-renew \
       --non-interactive \
@@ -423,7 +423,7 @@ cert_issue_dns_cloudflare() {
       --dns-cloudflare-credentials "$_cf_ini" \
       -d "$_domain_name" \
       -m "$LE_EMAIL" \
-      --deploy-hook "$_deploy" || return 1
+      --deploy-hook "$_deploy") || { out "$_certbot"; return 1; }
   fi
 
   # Export the RENEWED_DOMAINS directory
@@ -560,27 +560,28 @@ renew_by_id() {
       out "More than 30 days left on $_cdn_domain certificates. Skipping."
       return
     fi
-    out "Less than 30 days left on $_cdn_domain certificate. Renewing."
+    out "Less than 30 days left on $_cdn_domain certificate."
   fi
 
+  out "Issuing a new certificate for $_cdn_domain"
   # Issue a new certificate with Certbot
   if ! _cert_dir=$(cert issue "$CERTBOT_DNS_PLUGIN" "$_cdn_domain"); then
     out "$_cert_dir"
     return 1
   fi
 
-  _private_key="$(replace_newline "$_cert_dir"/"$LE_Private_Key")"
-  _leaf_cert="$(replace_newline "$_cert_dir"/"$LE_Leaf_Certificate")"
-  _fullchain="$(replace_newline "$_cert_dir"/"$LE_Chain_Certificate")"
+  _private_key="$_cert_dir/$LE_Private_Key"
+  _leaf_cert="$_cert_dir/$LE_Leaf_Certificate"
+  _fullchain="$_cert_dir/$LE_Chain_Certificate"
   _cert_name=$(make_certname "$_cdn_domain" "$_leaf_cert") || \
     { out "$_cert_name"; return 1; }
 
   out "Uploading new cert."
   _new_cert=$(cert upload \
     "$_cert_name" \
-    "$_private_key" \
-    "$_leaf_cert" \
-    "$_fullchain") || { out "$_new_cert"; return 1; }
+    "$(replace_newline "$_private_key")" \
+    "$(replace_newline "$_leaf_cert")" \
+    "$(replace_newline "$_fullchain")") || { out "$_new_cert"; return 1; }
 
   _new_cert_id=$(out "$_new_cert" \
     | "$JQ_BIN" -r \
@@ -597,7 +598,7 @@ renew_by_id() {
     "$_cdn_domain" \
     "$_cdn_ttl"); then
       out "$_update"
-      return 1
+      return 
   fi
 
   _att=0
@@ -721,7 +722,7 @@ main() {
       --dns-plugin=*) CERTBOT_DNS_PLUGIN="${1#*=}" ; shift ;;
       --certbot) CERTBOT_BIN="$2" ; shift 2 ;;
       --certbot=*) CERTBOT_BIN="${1#*=}" ; shift ;;
-      --force) CERTBOT_FORCE=true ; shift ;;
+      --force-renew) CERTBOT_FORCE=true ; shift ;;
       --staging) CERTBOT_STAGING=true ; shift ;;
       --curl) CURL_BIN="$2" ; shift 2 ;;
       --curl=*) CURL_BIN="${1#*=}" ; shift ;;
@@ -741,6 +742,9 @@ main() {
   # Creating an array, globbing is intentional
   # shellcheck disable=SC2086
   set -- $_arg_cmd
+
+  # Daemon Mode check
+  if "$DAEMON_MODE"; then VERBOSE=3; fi
 
   # Debug Mode: Attempt to process ANY commands 
   if "$DEBUG_MODE"; then "$@" ; return; fi
