@@ -37,7 +37,7 @@ RENEWED_DOMAINS="${RENEWED_DOMAINS:-}"
 ########################################
 
 trap_exit() {
-  cleanup "$Temp_Dir"
+  "$DEBUG_MODE" || cleanup "$Temp_Dir"
 }
 
 ########################################
@@ -212,7 +212,7 @@ http_func() {
   case "$_method" in
     GET|PUT) _ret_ok=200 ;;
     POST) _ret_ok=201 ;;
-    DELETE) _ret_ok=204 ;;
+    PATCH|DELETE) _ret_ok=204 ;;
     *) out "$PRGNAM::http_func Invalid method." ; return 1 ;;
   esac
 
@@ -281,28 +281,32 @@ cdn_get() {
   out "$_res"
 }
 
-# TODO: a loop to ensure the update was successfull, DO api is not reliable
 cdn_update() {
-  # Accepts: cdn_id, certificate_id
+  # Accepts: cdn_id, origin, endpoint, created_at, certificate_id, domain, ttl
   # Globals: DIGITALOCEAN_TOKEN
   # Returns: Confirmation json with new CDN details
   _usage="cdn update <cdn_id> <certificate_id>"
-  [ -n "$*" ] || { out "Usage: $_usage"; return 1; }
-  case "$1" in usage) out "Usage: $_usage" ; return ;; esac
+  [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
+  case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
   _cdn_id="$1" 
-  _cert_id="$2"
+  _cdn_origin="$2"
+  _cdn_endpoint="$3"
+  _cdn_created="$4"
+  _new_cert_id="$5"
+  _cdn_domain="$6"
+  _cdn_ttl="$7"
   _method="PUT"
   _endpoint="$DO_CDN_Endpoint/$_cdn_id"
-  _data="$(make_temp)" || { out "$_data"; return 1; }
+  _payload="$(make_temp)" || { out "$_payload"; return 1; }
 
-  cat << EOF > "$_data"
-  { "certificate_id": "$_cert_id" }
+  cat << EOF > "$_payload"
+{"id": "$_cdn_id", "origin": "$_cdn_origin", "endpoint": "$_cdn_endpoint", "created_at": "$_cdn_created", "certificate_id": "$_new_cert_id", "custom_domain": "$_cdn_domain", "ttl": $_cdn_ttl}
 EOF
 
   _res=$(http_func \
     "$_method" \
     "$_endpoint" \
-    "$_data") || { out "$_res"; return 1; }
+    "$_payload") || { out "$_res"; return 1; }
 
   out "$_res"
 }
@@ -498,28 +502,52 @@ renew_by_id() {
   [ -n "$1" ] || { out "Usage: $_usage"; return 1; }
   case "$1" in help|usage) out "Usage: $_usage" ; return ;; esac
   _cdn_id="$1"
-  _dns_plugin="$CERTBOT_DNS_PLUGIN"
-  _cdn=""
-  _cert_id="" _domain=""
-  _cert="" _cert_expiry="" _now=""
-  _upload="" _upload_id=""
-  _update="" _del=""
+  _cdn=""         _cdn_origin=""    _cdn_endpoint=""  _cdn_created=""
+  _old_cert_id="" _cdn_domain=""    _cdn_ttl=""
+  _old_cert=""    _cert_expiry="" 
+  _new_cert=""    _new_cert_id=""   _cdn_cert_id=""
+  _update=""      _del=""
 
-  [ -x "$JQ_BIN" ] || { out "jq not found in path."; return 1; }
+  [ -x "$JQ_BIN" ] || { out "jq not found in path"; return 1; }
+  [ -n "$CERTBOT_DNS_PLUGIN" ] || { out "CERTBOT_DNS_PLUGIN unset"; return 1; }
 
-  _cdn=$(cdn get "$_cdn_id") || { out "$_cdn"; return 1; }
+  # Get cdn json
+  if ! _cdn=$(cdn get "$_cdn_id"); then
+    out "$_cdn"
+    return 1
+  fi
+
+  _cdn_origin=$(out "$_cdn" \
+    | "$JQ_BIN" -r \
+    .endpoint.origin) || { out "$_cdn_origin"; return 1; }
+
+  _cdn_endpoint=$(out "$_cdn" \
+    | "$JQ_BIN" -r \
+    .endpoint.endpoint) || { out "$_cdn_endpoint"; return 1; }
   
-  _cert_id=$(out "$_cdn" \
+  _cdn_created=$(out "$_cdn" \
     | "$JQ_BIN" -r \
-    .endpoint.certificate_id) || { out "$_cert_id"; return 1; }
+    .endpoint.created_at) || { out "$_cdn_created"; return 1; }
 
-  _domain=$(out "$_cdn" \
+  _old_cert_id=$(out "$_cdn" \
     | "$JQ_BIN" -r \
-    .endpoint.custom_domain) || { out "$_domain"; return 1; }
+    .endpoint.certificate_id) || { out "$_old_cert_id"; return 1; }
 
-  _cert=$(cert get "$_cert_id") || { out "$_cert"; return 1; }
+  _cdn_domain=$(out "$_cdn" \
+    | "$JQ_BIN" -r \
+    .endpoint.custom_domain) || { out "$_cdn_domain"; return 1; }
 
-  _cert_expiry=$(out "$_cert" \
+  _cdn_ttl=$(out "$_cdn" \
+    | "$JQ_BIN" -r \
+    .endpoint.ttl) || { out "$_cdn_ttl"; return 1; }
+
+  # Get old certficiate json
+  if ! _old_cert=$(cert get "$_old_cert_id"); then
+    out "$_old_cert"
+    return 1
+  fi
+
+  _cert_expiry=$(out "$_old_cert" \
     | "$JQ_BIN" -r \
     .certificate.not_after) || { out "$_cert_expiry"; return 1; }
 
@@ -529,49 +557,85 @@ renew_by_id() {
     _cert_expiry=$(date_to_secs "$_cert_expiry") || { out "$_cert_expiry"; return 1; }
     _now=$(date_to_secs "$(now)") || { out "$_now"; return 1; }
     if [ $(( _cert_expiry - _now )) -gt 30 ]; then
-      out "More than 30 days left on $_domain certificates. Skipping."
+      out "More than 30 days left on $_cdn_domain certificates. Skipping."
       return
     fi
-    out "Less than 30 days left on $_domain certificate. Renewing."
+    out "Less than 30 days left on $_cdn_domain certificate. Renewing."
   fi
 
   # Issue a new certificate with Certbot
-  if ! _cert_dir=$(cert issue "$_dns_plugin" "$_domain"); then
+  if ! _cert_dir=$(cert issue "$CERTBOT_DNS_PLUGIN" "$_cdn_domain"); then
     out "$_cert_dir"
     return 1
   fi
 
-  _private_key="$_cert_dir/$LE_Private_Key"
-  _leaf_cert="$_cert_dir/$LE_Leaf_Certificate"
-  _fullchain="$_cert_dir/$LE_Chain_Certificate"
-  _cert_name=$(make_certname "$_domain" "$_leaf_cert") || { out "$_cert_name"; return 1; }
+  _private_key="$(replace_newline "$_cert_dir"/"$LE_Private_Key")"
+  _leaf_cert="$(replace_newline "$_cert_dir"/"$LE_Leaf_Certificate")"
+  _fullchain="$(replace_newline "$_cert_dir"/"$LE_Chain_Certificate")"
+  _cert_name=$(make_certname "$_cdn_domain" "$_leaf_cert") || \
+    { out "$_cert_name"; return 1; }
 
   out "Uploading new cert."
-  _upload=$(cert upload \
+  _new_cert=$(cert upload \
     "$_cert_name" \
-    "$(replace_newline "$_private_key")" \
-    "$(replace_newline "$_leaf_cert")" \
-    "$(replace_newline "$_fullchain")") || { out "$_upload"; return 1; }
+    "$_private_key" \
+    "$_leaf_cert" \
+    "$_fullchain") || { out "$_new_cert"; return 1; }
 
-  _upload_id=$(out "$_upload" \
+  _new_cert_id=$(out "$_new_cert" \
     | "$JQ_BIN" -r \
-    .certificate.id) || { out "$_upload_id"; return 1; }
+    .certificate.id) || { out "$_new_cert_id"; return 1; }
 
   # Update CDN with new certificate id
-  out "Updating $_cdn_id with new certificate $_upload_id..."
-  if ! _update=$(cdn update "$_cdn_id" "$_upload_id"); then
-    out "$_update"
+  out "Updating $_cdn_id with new certificate $_new_cert_id..."
+  if ! _update=$(cdn update \
+    "$_cdn_id" \
+    "$_cdn_origin" \
+    "$_cdn_endpoint" \
+    "$_cdn_created" \
+    "$_new_cert_id" \
+    "$_cdn_domain" \
+    "$_cdn_ttl"); then
+      out "$_update"
+      return 1
+  fi
+
+  _att=0
+  while [ "$_cdn_cert_id" != "$_new_cert_id" ]; do
+    if [ "$_att" -gt 10 ]; then
+      break
+    fi
+
+    # Get cdn json
+    if ! _cdn=$(cdn get "$_cdn_id"); then
+      out "$_cdn"
+      return 1
+    fi
+
+    # Get current cdn certificate id
+    _cdn_cert_id=$(out "$_cdn" \
+      | "$JQ_BIN" -r \
+      .endpoint.certificate_id) || { out "$_cdn_cert_id"; return 1; }
+
+    out "Waiting 30 seconds for CDN update to propalgate. (Attempt: $_att/10)"
+    sleep 30
+    _att=$(( _att + 1 ))
+  done
+
+  if [ "$_cdn_cert_id" != "$_new_cert_id" ]; then
+    out "Unable to update CDN certificate. Try doing it manually."
     return 1
   fi
-  out "Updated $_cdn_id."
+  
+  out "Successfully updated $_cdn_id."
 
-#   # Delete old certificate
-#   out "Deleting old certificate"
-#   if ! _del=$(cert delete "$_cert_id"); then
-#     out "$_del"
-#     return 1
-#   fi
-#   out "Deleted old certificate: $_cert_id."
+   # Delete old certificate
+  out "Deleting old certificate"
+  if ! _del=$(cert delete "$_old_cert_id"); then
+    out "$_del"
+    return 1
+  fi
+  out "Deleted old certificate: $_old_cert_id."
 
 }
 
