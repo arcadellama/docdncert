@@ -7,7 +7,7 @@ git clone git@github.com:arcadellama/docdncert
 
 cd docdncert
 
-docker build it "docdncert" .
+docker build -t "docdncert" .
 
 docker run --rm \
   --env-file .env \
