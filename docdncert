@@ -553,12 +553,15 @@ renew_by_id() {
     .certificate.not_after) || { out "$_cert_expiry"; return 1; }
 
   # Check if more than 30 days left on expiration
+  # 1 day = 86400
   # 30 days = 2592000 seconds
   if ! "$CERTBOT_FORCE"; then
     _cert_expiry=$(date_to_secs "$_cert_expiry") || { out "$_cert_expiry"; return 1; }
     _now=$(date_to_secs "$(now)") || { out "$_now"; return 1; }
-    if [ $(( _cert_expiry - _now )) -gt 2592000 ]; then
-      out "More than 30 days left on $_cdn_domain certificates. Skipping."
+    _seconds_until_expired=$(( _cert_expiry - _now ))
+    _days_until_expired=$(( _seconds_until_expired / 86400 ))
+    if [ "$_seconds_until_expired" -gt 2592000 ]; then
+      out "More than 30 days left ("$_days_until_expired" days) on $_cdn_domain certificates. Skipping."
       return
     fi
     out "Less than 30 days left on $_cdn_domain certificate."
