@@ -167,12 +167,12 @@ secs_left() {
 
 date_to_secs() {
   # GNU date
-  if date -d "$1" '+%s' 2>/dev/null; then
+  if TZ="UTC" date -d "$1" '+%s' 2>/dev/null; then
     return
   fi
   
   # BSD date
-  if date -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" '+%s' 2>/dev/null; then
+  if TZ="UTC" date -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" '+%s' 2>/dev/null; then
     return 
   fi
 
@@ -557,7 +557,7 @@ renew_by_id() {
   if ! "$CERTBOT_FORCE"; then
     _cert_expiry=$(date_to_secs "$_cert_expiry") || { out "$_cert_expiry"; return 1; }
     _now=$(date_to_secs "$(now)") || { out "$_now"; return 1; }
-    if [ $(( _cert_expiry - _now )) -gt 30 ]; then
+    if [ $(( _cert_expiry - _now )) -gt 2592000 ]; then
       out "More than 30 days left on $_cdn_domain certificates. Skipping."
       return
     fi
