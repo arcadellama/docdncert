@@ -564,7 +564,7 @@ renew_by_id() {
       out "More than 60 days left ("$_days_until_expired" days) on $_cdn_domain certificates. Skipping."
       return
     fi
-    out "Less than 30 days left on $_cdn_domain certificate."
+    out "Less than 60 days left on $_cdn_domain certificate."
   fi
 
   out "Issuing a new certificate for $_cdn_domain"
